@@ -1,0 +1,47 @@
+name: Deploy (VPS)
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tvv-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Deploy after CI succeeds on pushes to main (or manually).
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.TVV_DEPLOY_SSH_KEY }}
+
+      - name: Add host key
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.TVV_DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy (forced command)
+        env:
+          HOST: ${{ secrets.TVV_DEPLOY_HOST }}
+          USER: ${{ secrets.TVV_DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          ssh -T -o BatchMode=yes "${USER}@${HOST}"
+
