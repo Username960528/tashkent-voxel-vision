@@ -73,13 +73,18 @@
 
 ## Выходные артефакты (структура релиза)
 Для каждого года `YYYY`:
-- `data/releases/<run_id>/raster/green_mask_<YYYY>.tif` (COG, 0/1, WGS84, 10m)
-- (опционально) `data/releases/<run_id>/raster/ndvi_<YYYY>.tif` (COG, float32)
+- `data/releases/<run_id>/raster/green_mask_<YYYY>.tif` (COG/GeoTIFF, 0/1, **EPSG:32642 (UTM 42N)**, 10m)
+- (опционально) `data/releases/<run_id>/raster/ndvi_<YYYY>.tif` (COG/GeoTIFF, float32, **EPSG:32642 (UTM 42N)**, 10m)
 - (опционально) `data/releases/<run_id>/vector/green_sat_<YYYY>.parquet` (упрощённые полигоны зелени)
 
 Метаданные:
 - `data/releases/<run_id>/manifest.json` должен включать даты и параметры источника (диапазон дат, коллекция, пороги) и список файлов (sha256/size).
 
+Примечание по CRS: Sentinel-2 сцены в Earth Search идут в UTM-тайлах, и на MVP мы сохраняем растр в исходной UTM сетке (метры), чтобы:
+- пиксель был стабильным 10m,
+- последующие площади/агрегации по сетке считались корректно.
+
+Для веб-рендера (MapLibre) позже можно будет отдельно собрать тайлы/пере-проекцию.
+
 ## Конфигурация
 Машиночитаемый конфиг хранится в `packages/data/src/time_slices.json`.
-
