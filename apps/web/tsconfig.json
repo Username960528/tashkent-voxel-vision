@@ -14,7 +14,6 @@
       }
     ],
     "allowJs": true,
-    "incremental": true,
     "esModuleInterop": true
   },
   "include": [
