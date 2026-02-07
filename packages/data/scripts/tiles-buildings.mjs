@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -5,11 +6,21 @@ import { parseArgs } from './lib/args.mjs';
 import { buildPmtilesLayer } from './lib/tiles.mjs';
 import { findRepoRoot } from './lib/repo-root.mjs';
 
+async function fileExists(filePath) {
+  try {
+    await fs.stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function printHelp() {
   console.log(`Usage:
   node packages/data/scripts/tiles-buildings.mjs --run_id=<id> [--dev-mvt-dir] [--dry-run]
 
-Input:
+Inputs (prefers simplified if present):
+  data/releases/<run_id>/vector/buildings_simplified.parquet
   data/releases/<run_id>/vector/buildings.parquet
 
 Output:
@@ -35,11 +46,17 @@ async function main() {
   const repoRoot = (await findRepoRoot(process.cwd())) ?? process.cwd();
 
   try {
+    const runRoot = path.join(repoRoot, 'data', 'releases', runId);
+    const simplifiedRel = path.join('vector', 'buildings_simplified.parquet').replaceAll('\\', '/');
+    const simplifiedAbs = path.join(runRoot, simplifiedRel);
+    const defaultRel = path.join('vector', 'buildings.parquet').replaceAll('\\', '/');
+    const inParquetRel = (await fileExists(simplifiedAbs)) ? simplifiedRel : defaultRel;
+
     const report = await buildPmtilesLayer({
       repoRoot,
       runId,
       layer: 'buildings',
-      inParquetRel: path.join('vector', 'buildings.parquet').replaceAll('\\', '/'),
+      inParquetRel,
       outPmtilesRel: path.join('tiles', 'buildings.pmtiles').replaceAll('\\', '/'),
       devMvtDirRel: devMvtDir ? path.join('tiles', 'buildings').replaceAll('\\', '/') : null,
       include: ['id', 'height_m', 'height_source'],
@@ -70,4 +87,3 @@ const isEntrypoint = (() => {
 if (isEntrypoint) {
   await main();
 }
-
