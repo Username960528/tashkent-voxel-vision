@@ -1,0 +1,21 @@
+node_modules/
+.pnpm-store/
+
+# Next.js
+.next/
+out/
+
+# Builds
+dist/
+
+# Local env
+.env
+.env.*.local
+
+# Data artifacts (never commit)
+data/raw/
+data/releases/
+
+# Misc
+.DS_Store
+
