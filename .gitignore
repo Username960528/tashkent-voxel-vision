@@ -7,6 +7,7 @@ out/
 
 # Builds
 dist/
+*.tsbuildinfo
 
 # Local env
 .env
@@ -18,4 +19,3 @@ data/releases/
 
 # Misc
 .DS_Store
-
