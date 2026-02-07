@@ -200,6 +200,10 @@ body {
   border: none;
 }
 
+.tvv-swatch--grid {
+  background: linear-gradient(135deg, #dcfce7, #22c55e);
+}
+
 .tvv-hint {
   margin-top: 12px;
   border-radius: 12px;
