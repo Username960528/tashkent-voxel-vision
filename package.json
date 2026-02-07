@@ -13,6 +13,8 @@
     "data:aoi:write": "node packages/data/scripts/aoi-write.mjs",
     "data:grid": "node packages/data/scripts/grid.mjs",
     "data:osm:fetch": "node packages/data/scripts/osm-fetch.mjs",
+    "data:tiles:buildings": "node packages/data/scripts/tiles-buildings.mjs",
+    "data:tiles:base": "node packages/data/scripts/tiles-base.mjs",
     "data:smoke": "node --test packages/data/test/aoi-grid-smoke.test.mjs",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
