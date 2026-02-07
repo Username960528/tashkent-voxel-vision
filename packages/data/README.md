@@ -44,3 +44,14 @@ Notes:
 - `vector/grid_500m.parquet` is written in a projected CRS (meters) for correct areas.
 - The web overlay uses `metrics/grid_500m_metrics.geojson` (WGS84 / EPSG:4326).
 
+## Serving Artifacts (Local Dev)
+PMTiles are fetched in the browser via HTTP Range requests, so you need a server that supports `Range`.
+
+This repo includes a small dev server:
+```bash
+pnpm data:serve --port=8787
+```
+
+Then run the web app with:
+- `NEXT_PUBLIC_BASE_DATA_URL=http://127.0.0.1:8787/data/releases`
+- `NEXT_PUBLIC_RUN_ID=<run_id>` (or use `?run_id=<run_id>` in the URL)
