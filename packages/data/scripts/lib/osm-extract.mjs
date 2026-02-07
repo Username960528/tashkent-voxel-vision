@@ -139,7 +139,21 @@ export async function extractOsm(opts) {
     } else {
       // Osmium pipeline: clip to AOI, filter per layer by tags, export GeoJSONSeq, then convert to GeoParquet.
       const aoiPbf = path.join(tmpDir, 'aoi.osm.pbf');
-      run('osmium', ['extract', '--polygon', aoiGeojsonAbsPath, '--no-progress', '-O', '-o', aoiPbf, rawAbsPath]);
+      const bbox = Array.isArray(manifest?.aoi?.bbox) ? manifest.aoi.bbox : null;
+      const bboxStr =
+        Array.isArray(bbox) &&
+        bbox.length === 4 &&
+        bbox.every((n) => typeof n === 'number' && Number.isFinite(n))
+          ? bbox.join(',')
+          : null;
+
+      if (bboxStr) {
+        run('osmium', ['extract', '--bbox', bboxStr, '--no-progress', '-O', '-o', aoiPbf, rawAbsPath]);
+      } else {
+        // Note: `osmium extract --polygon` expects Osmium's polygon format (usually `.poly`).
+        // We keep this fallback for future support, but prefer bbox extracts for compatibility.
+        run('osmium', ['extract', '--polygon', aoiGeojsonAbsPath, '--no-progress', '-O', '-o', aoiPbf, rawAbsPath]);
+      }
 
       for (const layer of LAYERS) {
         const filteredPbf = path.join(tmpDir, `${layer}.osm.pbf`);
@@ -179,4 +193,3 @@ export async function extractOsm(opts) {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 }
-
