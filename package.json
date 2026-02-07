@@ -12,6 +12,7 @@
     "data:release:init": "node packages/data/scripts/release-init.mjs",
     "data:aoi:write": "node packages/data/scripts/aoi-write.mjs",
     "data:grid": "node packages/data/scripts/grid.mjs",
+    "data:osm:fetch": "node packages/data/scripts/osm-fetch.mjs",
     "data:smoke": "node --test packages/data/test/aoi-grid-smoke.test.mjs",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
