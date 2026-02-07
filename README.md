@@ -14,8 +14,10 @@ pnpm install
 pnpm dev
 ```
 
+## Data Pipeline
+See `packages/data/README.md`.
+
 ## Workspace Layout
 - `apps/web`: Next.js web app (MapLibre UI)
 - `packages/shared`: shared types/utils
 - `packages/data`: data pipeline CLIs (AOI, OSM, tiles, metrics)
-
