@@ -17,5 +17,9 @@ dist/
 data/raw/
 data/releases/
 
+# Python (packages/data venv + caches)
+packages/data/.venv/
+packages/data/scripts/py/__pycache__/
+
 # Misc
 .DS_Store
