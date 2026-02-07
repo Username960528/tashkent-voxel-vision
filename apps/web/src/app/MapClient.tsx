@@ -100,6 +100,15 @@ export function MapClient() {
         return;
       }
 
+      // Register PMTiles archives so MapLibre can request TileJSON + tiles via the `pmtiles://` protocol.
+      for (const url of Object.values(pmtilesUrls)) {
+        try {
+          protocol.add(new pmtiles.PMTiles(stripPmtilesProtocol(url)));
+        } catch {
+          // ignore; MapLibre will surface load errors via `map.on('error', ...)`.
+        }
+      }
+
       // Non-blocking existence check for quick feedback when tiles are missing.
       // If it fails due to CORS or unsupported methods, we just skip the hint.
       void (async () => {
