@@ -127,6 +127,13 @@ def main():
             dropped_empty += 1
             continue
 
+        allowed_types = set(_default_geom_types_for_layer(args.layer))
+        if allowed_types and geom.geom_type not in allowed_types:
+            # `osmium export` can emit Points/LineStrings when ways are incomplete (eg near AOI boundary).
+            # Keep layers clean by dropping unexpected geometry types.
+            dropped_empty += 1
+            continue
+
         if geom.geom_type in ("Polygon", "MultiPolygon") and not geom.is_valid:
             invalid_polygons += 1
             fixed = None
@@ -237,4 +244,3 @@ if __name__ == "__main__":
         main()
     except BrokenPipeError:
         sys.exit(1)
-
