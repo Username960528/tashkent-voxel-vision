@@ -19,6 +19,7 @@
     "data:metrics:grid": "node packages/data/scripts/metrics-grid.mjs",
     "data:tiles:buildings": "node packages/data/scripts/tiles-buildings.mjs",
     "data:tiles:base": "node packages/data/scripts/tiles-base.mjs",
+    "data:green:build": "node packages/data/scripts/green-build.mjs",
     "data:serve": "node packages/data/scripts/serve-data.mjs",
     "data:smoke": "node --test packages/data/test/aoi-grid-smoke.test.mjs",
     "lint": "pnpm -r lint",

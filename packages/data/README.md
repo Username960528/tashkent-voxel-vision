@@ -32,6 +32,9 @@ pnpm data:tiles:base --run_id=tashkent_2026-02-07
 
 pnpm data:grid --run_id=tashkent_2026-02-07 --cell=500
 pnpm data:metrics:grid --run_id=tashkent_2026-02-07 --cell=500
+
+# Satellite Green Masks (Sentinel-2, optional)
+pnpm data:green:build --run_id=tashkent_2026-02-07 --years=2024
 ```
 
 Outputs (per release):
@@ -39,6 +42,7 @@ Outputs (per release):
 - `vector/`: extracted GeoParquet layers (`buildings.parquet`, `roads.parquet`, `water.parquet`, `green.parquet`), plus optional `buildings_simplified.parquet`
 - `tiles/`: `*.pmtiles` layers for the web app
 - `metrics/`: `grid_500m_metrics.parquet` + `grid_500m_metrics.geojson` (web overlay)
+- `raster/` (optional): Sentinel-2 NDVI composite + `green_mask_<year>.tif` (see `docs/time_slices.md`)
 
 Notes:
 - `vector/grid_500m.parquet` is written in a projected CRS (meters) for correct areas.
