@@ -1,12 +1,34 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import maplibregl, { type LayerSpecification, type Map, type StyleSpecification } from 'maplibre-gl';
+import { useEffect, useRef, useState } from 'react';
+import maplibregl, { type LayerSpecification, type Map, type MapGeoJSONFeature, type StyleSpecification } from 'maplibre-gl';
 import * as pmtiles from 'pmtiles';
 
 const TASHKENT_CENTER: [number, number] = [69.2401, 41.2995];
 
 type PmtilesLayerKey = 'buildings' | 'green' | 'roads' | 'water';
+
+const PMTILES_LAYER_KEYS: readonly PmtilesLayerKey[] = ['buildings', 'green', 'roads', 'water'];
+
+type LayerVisibility = Record<PmtilesLayerKey, boolean>;
+
+const DEFAULT_LAYER_VISIBILITY: LayerVisibility = {
+  buildings: true,
+  green: true,
+  roads: true,
+  water: true,
+};
+
+const LAYER_META: Record<PmtilesLayerKey, { label: string }> = {
+  buildings: { label: 'Buildings' },
+  green: { label: 'Green' },
+  roads: { label: 'Roads' },
+  water: { label: 'Water' },
+};
+
+const BUILDINGS_LAYER_ID = 'buildings-extrusion';
+const BUILDINGS_SELECTED_LAYER_ID = 'buildings-selected-extrusion';
+const BUILDINGS_HOVER_LAYER_ID = 'buildings-hover-extrusion';
 
 function joinUrlParts(a: string, b: string) {
   return `${a.replace(/\/+$/g, '')}/${b.replace(/^\/+/, '')}`;
@@ -45,23 +67,158 @@ function stripPmtilesProtocol(url: string) {
   return url.replace(/^pmtiles:\/\//, '');
 }
 
+function parseRunIdParam(raw: string | null): string | null {
+  const trimmed = (raw ?? '').trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseLayersParam(raw: string | null): LayerVisibility | null {
+  if (raw === null) return null;
+
+  const next: LayerVisibility = {
+    buildings: false,
+    green: false,
+    roads: false,
+    water: false,
+  };
+
+  for (const part of raw.split(',')) {
+    const key = part.trim();
+    if (key === 'buildings' || key === 'green' || key === 'roads' || key === 'water') {
+      next[key] = true;
+    }
+  }
+
+  return next;
+}
+
+function serializeLayersParam(layers: LayerVisibility) {
+  return PMTILES_LAYER_KEYS.filter((k) => layers[k]).join(',');
+}
+
+type BuildingInfo = {
+  id: string;
+  height_m: number | null;
+  height_source: string | null;
+};
+
+type HoverState = {
+  x: number;
+  y: number;
+  info: BuildingInfo;
+};
+
+function asStringOrNull(v: unknown): string | null {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  return null;
+}
+
+function asNumberOrNull(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function getBuildingInfo(feature: MapGeoJSONFeature): BuildingInfo | null {
+  const props = (feature.properties ?? {}) as Record<string, unknown>;
+  const id = asStringOrNull(props.id);
+  if (!id) return null;
+  return {
+    id,
+    height_m: asNumberOrNull(props.height_m),
+    height_source: asStringOrNull(props.height_source),
+  };
+}
+
 export function MapClient() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
+  const protocolRef = useRef<pmtiles.Protocol | null>(null);
+  const registeredPmtilesRef = useRef<Set<string>>(new Set());
+  const currentRunIdRef = useRef<string | null>(null);
+
+  const hoverRafRef = useRef<number | null>(null);
+  const lastHoverPointRef = useRef<{ x: number; y: number } | null>(null);
+  const hoveredIdRef = useRef<string | null>(null);
+  const selectedIdRef = useRef<string | null>(null);
+
+  const baseDataUrl = process.env.NEXT_PUBLIC_BASE_DATA_URL ?? null;
+  const envRunId = process.env.NEXT_PUBLIC_RUN_ID ?? null;
+
+  const [mapLoaded, setMapLoaded] = useState(false);
+  const [isUrlInitialized, setIsUrlInitialized] = useState(false);
+
   const [hint, setHint] = useState<string | null>(null);
+  const [runId, setRunId] = useState<string | null>(envRunId);
+  const [draftRunId, setDraftRunId] = useState(envRunId ?? '');
+  const [layers, setLayers] = useState<LayerVisibility>(DEFAULT_LAYER_VISIBILITY);
 
-  const pmtilesUrls = useMemo(() => {
-    const baseDataUrl = process.env.NEXT_PUBLIC_BASE_DATA_URL;
-    const runId = process.env.NEXT_PUBLIC_RUN_ID;
+  const [hover, setHover] = useState<HoverState | null>(null);
+  const [selected, setSelected] = useState<BuildingInfo | null>(null);
 
-    if (!baseDataUrl || !runId) return null;
-    return buildPmtilesUrls(baseDataUrl, runId);
+  const layersRef = useRef(layers);
+  useEffect(() => {
+    layersRef.current = layers;
+  }, [layers]);
+
+  const hoveredRef = useRef(hover);
+  useEffect(() => {
+    hoveredRef.current = hover;
+  }, [hover]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const applyFromUrl = () => {
+      const url = new URL(window.location.href);
+      const params = url.searchParams;
+
+      const nextRunId = parseRunIdParam(params.get('run_id'));
+      const nextLayers = parseLayersParam(params.get('layers'));
+
+      if (nextRunId !== null) {
+        setRunId(nextRunId);
+        setDraftRunId(nextRunId);
+      }
+
+      if (nextLayers !== null) {
+        setLayers(nextLayers);
+      }
+    };
+
+    applyFromUrl();
+    setIsUrlInitialized(true);
+
+    const onPopState = () => applyFromUrl();
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
   }, []);
+
+  useEffect(() => {
+    if (!isUrlInitialized) return;
+    if (typeof window === 'undefined') return;
+
+    const url = new URL(window.location.href);
+    const params = url.searchParams;
+
+    if (runId) params.set('run_id', runId);
+    else params.delete('run_id');
+
+    params.set('layers', serializeLayersParam(layers));
+
+    const next = `${url.pathname}?${params.toString()}${url.hash}`;
+    window.history.replaceState({}, '', next);
+  }, [isUrlInitialized, layers, runId]);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
     const protocol = new pmtiles.Protocol();
+    protocolRef.current = protocol;
     maplibregl.addProtocol('pmtiles', protocol.tile);
 
     const map = new maplibregl.Map({
@@ -92,18 +249,93 @@ export function MapClient() {
       if (err) maybeShowPmtilesHintFromError(err);
     });
 
-    map.once('load', () => {
-      if (!pmtilesUrls) {
-        setHint(
-          'PMTiles overlays disabled. Set NEXT_PUBLIC_BASE_DATA_URL and NEXT_PUBLIC_RUN_ID to enable buildings/roads/water/green.',
-        );
+    map.once('load', () => setMapLoaded(true));
+
+    return () => {
+      mapRef.current = null;
+      protocolRef.current = null;
+      map.remove();
+      try {
+        maplibregl.removeProtocol('pmtiles');
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!mapLoaded) return;
+
+    const map = mapRef.current;
+    if (!map) return;
+
+    const setLayerVisibility = (layerId: string, visible: boolean) => {
+      if (!map.getLayer(layerId)) return;
+      map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none');
+    };
+
+    const setBuildingsHighlight = (layerId: string, featureId: string | null) => {
+      if (!map.getLayer(layerId)) return;
+      if (!layersRef.current.buildings || !featureId) {
+        map.setLayoutProperty(layerId, 'visibility', 'none');
         return;
       }
+      map.setFilter(layerId, ['==', ['to-string', ['get', 'id']], featureId] as never);
+      map.setLayoutProperty(layerId, 'visibility', 'visible');
+    };
+
+    const clearHover = () => {
+      hoveredIdRef.current = null;
+      setHover(null);
+      setBuildingsHighlight(BUILDINGS_HOVER_LAYER_ID, null);
+    };
+
+    const clearSelection = () => {
+      selectedIdRef.current = null;
+      setSelected(null);
+      setBuildingsHighlight(BUILDINGS_SELECTED_LAYER_ID, null);
+    };
+
+    const removeLayerSafe = (id: string) => {
+      if (!map.getLayer(id)) return;
+      map.removeLayer(id);
+    };
+
+    const removeSourceSafe = (id: PmtilesLayerKey) => {
+      if (!map.getSource(id)) return;
+      map.removeSource(id);
+    };
+
+    const teardownOverlays = () => {
+      removeLayerSafe(BUILDINGS_HOVER_LAYER_ID);
+      removeLayerSafe(BUILDINGS_SELECTED_LAYER_ID);
+      removeLayerSafe(BUILDINGS_LAYER_ID);
+      removeLayerSafe('roads-line');
+      removeLayerSafe('green-fill');
+      removeLayerSafe('water-fill');
+
+      removeSourceSafe('buildings');
+      removeSourceSafe('roads');
+      removeSourceSafe('green');
+      removeSourceSafe('water');
+
+      currentRunIdRef.current = null;
+    };
+
+    const ensureOverlaysForRun = (nextRunId: string) => {
+      if (!baseDataUrl) return;
+      const protocol = protocolRef.current;
+      if (!protocol) return;
+
+      const pmtilesUrls = buildPmtilesUrls(baseDataUrl, nextRunId);
 
       // Register PMTiles archives so MapLibre can request TileJSON + tiles via the `pmtiles://` protocol.
       for (const url of Object.values(pmtilesUrls)) {
+        const bare = stripPmtilesProtocol(url);
+        if (registeredPmtilesRef.current.has(bare)) continue;
         try {
-          protocol.add(new pmtiles.PMTiles(stripPmtilesProtocol(url)));
+          protocol.add(new pmtiles.PMTiles(bare));
+          registeredPmtilesRef.current.add(bare);
         } catch {
           // ignore; MapLibre will surface load errors via `map.on('error', ...)`.
         }
@@ -117,7 +349,7 @@ export function MapClient() {
           const checks = await Promise.allSettled(urls.map((u) => fetch(u, { method: 'HEAD' })));
           const missing = checks.some((r) => r.status === 'fulfilled' && r.value.status === 404);
           if (missing) {
-            setHint((prev) => prev ?? 'PMTiles not found (404). Check NEXT_PUBLIC_BASE_DATA_URL and NEXT_PUBLIC_RUN_ID.');
+            setHint((prev) => prev ?? 'PMTiles not found (404). Check NEXT_PUBLIC_BASE_DATA_URL and run_id / NEXT_PUBLIC_RUN_ID.');
           }
         } catch {
           // ignore
@@ -175,73 +407,353 @@ export function MapClient() {
         },
       });
 
+      const heightExpr = ['coalesce', ['to-number', ['get', 'height_m']], 0] as never;
+
       addLayerSafe({
-        id: 'buildings-extrusion',
+        id: BUILDINGS_LAYER_ID,
         type: 'fill-extrusion',
         source: 'buildings',
         'source-layer': 'buildings',
         minzoom: 12,
         paint: {
           'fill-extrusion-color': '#d1d5db',
-          'fill-extrusion-height': ['get', 'height_m'],
+          'fill-extrusion-height': heightExpr,
           'fill-extrusion-base': 0,
           'fill-extrusion-opacity': 0.92,
         },
       });
-    });
 
-    return () => {
-      mapRef.current = null;
-      map.remove();
-      try {
-        maplibregl.removeProtocol('pmtiles');
-      } catch {
-        // ignore
+      // Selection + hover highlights (hidden until set via filters).
+      addLayerSafe({
+        id: BUILDINGS_SELECTED_LAYER_ID,
+        type: 'fill-extrusion',
+        source: 'buildings',
+        'source-layer': 'buildings',
+        minzoom: 12,
+        filter: ['==', ['to-string', ['get', 'id']], ''] as never,
+        layout: { visibility: 'none' },
+        paint: {
+          'fill-extrusion-color': '#f59e0b',
+          'fill-extrusion-height': heightExpr,
+          'fill-extrusion-base': 0,
+          'fill-extrusion-opacity': 0.98,
+        },
+      });
+
+      addLayerSafe({
+        id: BUILDINGS_HOVER_LAYER_ID,
+        type: 'fill-extrusion',
+        source: 'buildings',
+        'source-layer': 'buildings',
+        minzoom: 12,
+        filter: ['==', ['to-string', ['get', 'id']], ''] as never,
+        layout: { visibility: 'none' },
+        paint: {
+          'fill-extrusion-color': '#60a5fa',
+          'fill-extrusion-height': heightExpr,
+          'fill-extrusion-base': 0,
+          'fill-extrusion-opacity': 0.98,
+        },
+      });
+    };
+
+    const syncOverlays = () => {
+      if (!baseDataUrl || !runId) {
+        teardownOverlays();
+        clearSelection();
+        clearHover();
+        setHint(
+          'PMTiles overlays disabled. Set NEXT_PUBLIC_BASE_DATA_URL and NEXT_PUBLIC_RUN_ID (or use ?run_id=...) to enable buildings/roads/water/green.',
+        );
+        return;
+      }
+
+      if (currentRunIdRef.current !== runId) {
+        // Run hot-swap: rebuild PMTiles sources + layers in-place (no page reload).
+        setHint(null);
+        clearSelection();
+        clearHover();
+        teardownOverlays();
+        ensureOverlaysForRun(runId);
+        currentRunIdRef.current = runId;
+      }
+
+      // Apply per-layer visibility toggles.
+      setLayerVisibility('water-fill', layers.water);
+      setLayerVisibility('green-fill', layers.green);
+      setLayerVisibility('roads-line', layers.roads);
+      setLayerVisibility(BUILDINGS_LAYER_ID, layers.buildings);
+
+      if (!layers.buildings) {
+        clearSelection();
+        clearHover();
+      } else {
+        setBuildingsHighlight(BUILDINGS_SELECTED_LAYER_ID, selectedIdRef.current);
+        setBuildingsHighlight(BUILDINGS_HOVER_LAYER_ID, hoveredIdRef.current);
       }
     };
-  }, [pmtilesUrls]);
+
+    syncOverlays();
+  }, [baseDataUrl, layers, mapLoaded, runId]);
+
+  useEffect(() => {
+    if (!mapLoaded) return;
+    const map = mapRef.current;
+    if (!map) return;
+
+    const setHoverHighlight = (featureId: string | null) => {
+      if (hoveredIdRef.current === featureId) return;
+      hoveredIdRef.current = featureId;
+      if (!map.getLayer(BUILDINGS_HOVER_LAYER_ID)) return;
+      if (!layersRef.current.buildings || !featureId) {
+        map.setLayoutProperty(BUILDINGS_HOVER_LAYER_ID, 'visibility', 'none');
+        return;
+      }
+      map.setFilter(BUILDINGS_HOVER_LAYER_ID, ['==', ['to-string', ['get', 'id']], featureId] as never);
+      map.setLayoutProperty(BUILDINGS_HOVER_LAYER_ID, 'visibility', 'visible');
+    };
+
+    const setSelectedHighlight = (featureId: string | null) => {
+      if (selectedIdRef.current === featureId) return;
+      selectedIdRef.current = featureId;
+      if (!map.getLayer(BUILDINGS_SELECTED_LAYER_ID)) return;
+      if (!layersRef.current.buildings || !featureId) {
+        map.setLayoutProperty(BUILDINGS_SELECTED_LAYER_ID, 'visibility', 'none');
+        return;
+      }
+      map.setFilter(BUILDINGS_SELECTED_LAYER_ID, ['==', ['to-string', ['get', 'id']], featureId] as never);
+      map.setLayoutProperty(BUILDINGS_SELECTED_LAYER_ID, 'visibility', 'visible');
+    };
+
+    const clearHover = () => {
+      setHover(null);
+      setHoverHighlight(null);
+    };
+
+    const clearSelection = () => {
+      setSelected(null);
+      setSelectedHighlight(null);
+    };
+
+    const onKeyDown = (evt: KeyboardEvent) => {
+      if (evt.key !== 'Escape') return;
+      clearSelection();
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+
+    const onMouseMove = (evt: { point: { x: number; y: number } }) => {
+      lastHoverPointRef.current = { x: evt.point.x, y: evt.point.y };
+      if (hoverRafRef.current !== null) return;
+
+      hoverRafRef.current = window.requestAnimationFrame(() => {
+        hoverRafRef.current = null;
+
+        const pt = lastHoverPointRef.current;
+        if (!pt) return;
+
+        if (!layersRef.current.buildings || !map.getLayer(BUILDINGS_LAYER_ID)) {
+          if (hoveredRef.current) clearHover();
+          return;
+        }
+
+        const features = map.queryRenderedFeatures([pt.x, pt.y], { layers: [BUILDINGS_LAYER_ID] });
+        const feature = features[0];
+        if (!feature) {
+          if (hoveredRef.current) clearHover();
+          return;
+        }
+
+        const info = getBuildingInfo(feature);
+        if (!info) {
+          if (hoveredRef.current) clearHover();
+          return;
+        }
+
+        setHoverHighlight(info.id);
+        setHover({ x: pt.x, y: pt.y, info });
+      });
+    };
+
+    const onClick = (evt: { point: { x: number; y: number } }) => {
+      if (!layersRef.current.buildings || !map.getLayer(BUILDINGS_LAYER_ID)) {
+        clearSelection();
+        return;
+      }
+
+      const features = map.queryRenderedFeatures([evt.point.x, evt.point.y], { layers: [BUILDINGS_LAYER_ID] });
+      const feature = features[0];
+
+      if (!feature) {
+        clearSelection();
+        return;
+      }
+
+      const info = getBuildingInfo(feature);
+      if (!info) {
+        clearSelection();
+        return;
+      }
+
+      setSelected(info);
+      setSelectedHighlight(info.id);
+    };
+
+    map.on('mousemove', onMouseMove as never);
+    map.on('click', onClick as never);
+
+    const canvas = map.getCanvas();
+    const onCanvasMouseLeave = () => clearHover();
+    canvas.addEventListener('mouseleave', onCanvasMouseLeave);
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+
+      if (hoverRafRef.current !== null) {
+        window.cancelAnimationFrame(hoverRafRef.current);
+        hoverRafRef.current = null;
+      }
+
+      map.off('mousemove', onMouseMove as never);
+      map.off('click', onClick as never);
+      canvas.removeEventListener('mouseleave', onCanvasMouseLeave);
+    };
+  }, [mapLoaded]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100dvh' }}>
-      <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />
-      {hint ? (
-        <div
-          style={{
-            position: 'absolute',
-            top: 12,
-            left: 12,
-            maxWidth: 420,
-            background: 'rgba(0, 0, 0, 0.7)',
-            color: '#fff',
-            padding: '10px 12px',
-            borderRadius: 10,
-            fontSize: 13,
-            lineHeight: 1.35,
-            display: 'flex',
-            gap: 10,
-            alignItems: 'flex-start',
+    <div className="tvv-map-root">
+      <div ref={containerRef} className="tvv-map-canvas" />
+
+      <div className="tvv-panel tvv-panel--left">
+        <div className="tvv-panel__title">Overlays</div>
+
+        <form
+          className="tvv-form-row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const trimmed = draftRunId.trim();
+            setRunId(trimmed.length > 0 ? trimmed : envRunId);
           }}
         >
-          <div style={{ flex: '1 1 auto' }}>{hint}</div>
-          <button
-            type="button"
-            onClick={() => setHint(null)}
-            style={{
-              flex: '0 0 auto',
-              border: 'none',
-              background: 'rgba(255, 255, 255, 0.12)',
-              color: '#fff',
-              padding: '2px 8px',
-              borderRadius: 999,
-              cursor: 'pointer',
-              fontSize: 12,
-            }}
-            aria-label="Dismiss hint"
-            title="Dismiss"
-          >
-            Dismiss
-          </button>
+          <label className="tvv-label" htmlFor="tvv-run-id">
+            Run ID
+          </label>
+          <div className="tvv-form-inline">
+            <input
+              id="tvv-run-id"
+              className="tvv-input"
+              value={draftRunId}
+              onChange={(e) => setDraftRunId(e.target.value)}
+              placeholder={envRunId ?? 'unset'}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              inputMode="text"
+            />
+            <button className="tvv-btn" type="submit">
+              Apply
+            </button>
+          </div>
+        </form>
+
+        <div className="tvv-section">
+          <div className="tvv-section__label">Layers</div>
+          <div className="tvv-checkboxes">
+            {PMTILES_LAYER_KEYS.map((k) => (
+              <label key={k} className="tvv-checkbox">
+                <input
+                  type="checkbox"
+                  checked={layers[k]}
+                  onChange={() => setLayers((prev) => ({ ...prev, [k]: !prev[k] }))}
+                />
+                <span>{LAYER_META[k].label}</span>
+              </label>
+            ))}
+          </div>
         </div>
+
+        <div className="tvv-section">
+          <div className="tvv-section__label">Legend</div>
+          <div className="tvv-legend">
+            <div className="tvv-legend__item">
+              <span className="tvv-swatch tvv-swatch--buildings" /> Buildings
+            </div>
+            <div className="tvv-legend__item">
+              <span className="tvv-swatch tvv-swatch--green" /> Green
+            </div>
+            <div className="tvv-legend__item">
+              <span className="tvv-swatch tvv-swatch--water" /> Water
+            </div>
+            <div className="tvv-legend__item">
+              <span className="tvv-swatch tvv-swatch--roads" /> Roads
+            </div>
+          </div>
+        </div>
+
+        {hint ? (
+          <div className="tvv-hint">
+            <div className="tvv-hint__text">{hint}</div>
+            <button type="button" className="tvv-hint__btn" onClick={() => setHint(null)} aria-label="Dismiss hint">
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      {hover ? (
+        <div className="tvv-tooltip" style={{ left: hover.x + 12, top: hover.y + 12 }}>
+          <div className="tvv-kv">
+            <div className="tvv-kv__k">id</div>
+            <div className="tvv-kv__v">{hover.info.id}</div>
+          </div>
+          <div className="tvv-kv">
+            <div className="tvv-kv__k">height_m</div>
+            <div className="tvv-kv__v">{hover.info.height_m ?? 'null'}</div>
+          </div>
+          <div className="tvv-kv">
+            <div className="tvv-kv__k">height_source</div>
+            <div className="tvv-kv__v">{hover.info.height_source ?? 'null'}</div>
+          </div>
+        </div>
+      ) : null}
+
+      {selected ? (
+        <aside className="tvv-panel tvv-panel--right" aria-label="Building inspector">
+          <div className="tvv-panel__title-row">
+            <div className="tvv-panel__title">Building</div>
+            <button
+              type="button"
+              className="tvv-icon-btn"
+              onClick={() => {
+                selectedIdRef.current = null;
+                setSelected(null);
+                const map = mapRef.current;
+                if (map?.getLayer(BUILDINGS_SELECTED_LAYER_ID)) {
+                  map.setLayoutProperty(BUILDINGS_SELECTED_LAYER_ID, 'visibility', 'none');
+                }
+              }}
+              aria-label="Close inspector"
+              title="Close (Esc)"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="tvv-kv tvv-kv--panel">
+            <div className="tvv-kv__k">id</div>
+            <div className="tvv-kv__v">{selected.id}</div>
+          </div>
+          <div className="tvv-kv tvv-kv--panel">
+            <div className="tvv-kv__k">height_m</div>
+            <div className="tvv-kv__v">{selected.height_m ?? 'null'}</div>
+          </div>
+          <div className="tvv-kv tvv-kv--panel">
+            <div className="tvv-kv__k">height_source</div>
+            <div className="tvv-kv__v">{selected.height_source ?? 'null'}</div>
+          </div>
+
+          <div className="tvv-panel__footer">Esc clears selection.</div>
+        </aside>
       ) : null}
     </div>
   );

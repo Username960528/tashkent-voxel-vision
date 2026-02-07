@@ -8,3 +8,269 @@ body {
 * {
   box-sizing: border-box;
 }
+
+.tvv-map-root {
+  position: relative;
+  width: 100%;
+  height: 100dvh;
+}
+
+.tvv-map-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.tvv-panel {
+  position: absolute;
+  z-index: 10;
+  color: #f9fafb;
+  background: rgba(17, 24, 39, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  padding: 12px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  font: 13px/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.tvv-panel--left {
+  top: 12px;
+  left: 12px;
+  width: min(340px, calc(100vw - 24px));
+}
+
+.tvv-panel--right {
+  top: 88px;
+  right: 12px;
+  width: min(340px, calc(100vw - 24px));
+  max-height: calc(100dvh - 100px);
+  overflow: auto;
+}
+
+.tvv-panel__title,
+.tvv-panel__title-row .tvv-panel__title {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #fff;
+}
+
+.tvv-panel__title-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.tvv-panel__footer {
+  margin-top: 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.tvv-form-row {
+  margin-top: 10px;
+}
+
+.tvv-label {
+  display: block;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.78);
+  margin-bottom: 6px;
+}
+
+.tvv-form-inline {
+  display: flex;
+  gap: 8px;
+}
+
+.tvv-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.22);
+  color: #fff;
+  outline: none;
+}
+
+.tvv-input:focus {
+  border-color: rgba(96, 165, 250, 0.9);
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+}
+
+.tvv-btn {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+}
+
+.tvv-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.tvv-icon-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tvv-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.tvv-section {
+  margin-top: 12px;
+}
+
+.tvv-section__label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.78);
+  margin-bottom: 8px;
+}
+
+.tvv-checkboxes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+}
+
+.tvv-checkbox {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  user-select: none;
+}
+
+.tvv-checkbox input {
+  accent-color: #60a5fa;
+}
+
+.tvv-legend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+}
+
+.tvv-legend__item {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.tvv-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+}
+
+.tvv-swatch--buildings {
+  background: #d1d5db;
+}
+
+.tvv-swatch--green {
+  background: #86efac;
+}
+
+.tvv-swatch--water {
+  background: #93c5fd;
+}
+
+.tvv-swatch--roads {
+  width: 14px;
+  height: 4px;
+  border-radius: 999px;
+  background: #6b7280;
+  border: none;
+}
+
+.tvv-hint {
+  margin-top: 12px;
+  border-radius: 12px;
+  padding: 10px 10px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.tvv-hint__text {
+  flex: 1 1 auto;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.tvv-hint__btn {
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tvv-hint__btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.tvv-tooltip {
+  position: absolute;
+  z-index: 11;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  max-width: 280px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+}
+
+.tvv-kv {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 6px 10px;
+  align-items: baseline;
+}
+
+.tvv-kv--panel {
+  margin-top: 8px;
+}
+
+.tvv-kv__k {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.tvv-kv__v {
+  color: rgba(255, 255, 255, 0.98);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .tvv-panel--right {
+    top: auto;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: auto;
+    max-height: 44dvh;
+  }
+}
