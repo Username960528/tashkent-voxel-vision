@@ -148,11 +148,22 @@ export async function extractOsm(opts) {
           : null;
 
       if (bboxStr) {
-        run('osmium', ['extract', '--bbox', bboxStr, '--no-progress', '-O', '-o', aoiPbf, rawAbsPath]);
+        run('osmium', ['extract', '--bbox', bboxStr, '--no-progress', '-s', 'simple', '-O', '-o', aoiPbf, rawAbsPath]);
       } else {
         // Note: `osmium extract --polygon` expects Osmium's polygon format (usually `.poly`).
         // We keep this fallback for future support, but prefer bbox extracts for compatibility.
-        run('osmium', ['extract', '--polygon', aoiGeojsonAbsPath, '--no-progress', '-O', '-o', aoiPbf, rawAbsPath]);
+        run('osmium', [
+          'extract',
+          '--polygon',
+          aoiGeojsonAbsPath,
+          '--no-progress',
+          '-s',
+          'simple',
+          '-O',
+          '-o',
+          aoiPbf,
+          rawAbsPath,
+        ]);
       }
 
       for (const layer of LAYERS) {
