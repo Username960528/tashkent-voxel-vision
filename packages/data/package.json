@@ -8,9 +8,10 @@
   },
   "scripts": {
     "lint": "eslint -c ../../.eslintrc.cjs .",
-    "test": "node --test test/data-release-manifest.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "manifest:validate": "node scripts/manifest-validate.mjs",
     "release:init": "node scripts/release-init.mjs",
+    "osm:fetch": "node scripts/osm-fetch.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }

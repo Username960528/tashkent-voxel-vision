@@ -46,6 +46,14 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "region": {
+              "type": ["string", "null"],
+              "minLength": 1
+            },
+            "url": {
+              "type": ["string", "null"],
+              "format": "uri"
+            },
             "date": {
               "type": ["string", "null"],
               "format": "date-time"
@@ -53,6 +61,25 @@
             "etag": {
               "type": ["string", "null"],
               "minLength": 1
+            },
+            "downloaded_at": {
+              "type": ["string", "null"],
+              "format": "date-time"
+            },
+            "path": {
+              "type": ["string", "null"],
+              "minLength": 1
+            },
+            "sha256": {
+              "type": ["string", "null"],
+              "pattern": "^[a-fA-F0-9]{64}$"
+            },
+            "size": {
+              "type": ["integer", "null"],
+              "minimum": 0
+            },
+            "dry_run": {
+              "type": ["boolean", "null"]
             }
           }
         }
@@ -85,4 +112,3 @@
     }
   }
 }
-
