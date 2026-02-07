@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "aoi_id": "tashkent",
+  "dataset": {
+    "name": "sentinel-2-l2a-sr",
+    "notes": "Recommended source: Sentinel-2 L2A (surface reflectance). Implementation may use a STAC API (e.g. earth-search) or another catalog; keep params stable across years.",
+    "bands": {
+      "red": "B04",
+      "nir": "B08",
+      "scl": "SCL"
+    },
+    "resolution_m": 10,
+    "max_cloud_cover_percent": 60
+  },
+  "season": {
+    "name": "summer",
+    "start_mm_dd": "06-01",
+    "end_mm_dd": "09-01"
+  },
+  "years": [2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025],
+  "masking": {
+    "method": "scl",
+    "scl_exclude": [3, 8, 9, 10, 11]
+  },
+  "composite": {
+    "ndvi_method": "median",
+    "min_valid_observations": 3
+  },
+  "classification": {
+    "green_ndvi_threshold": 0.3
+  },
+  "postprocess": {
+    "morphology": {
+      "enabled": true,
+      "opening_pixels": 1,
+      "closing_pixels": 1
+    }
+  },
+  "outputs": {
+    "raster_dir": "raster",
+    "green_mask_template": "green_mask_{year}.tif",
+    "ndvi_template": "ndvi_{year}.tif",
+    "vector_dir": "vector",
+    "green_polygons_template": "green_sat_{year}.parquet"
+  }
+}
+
