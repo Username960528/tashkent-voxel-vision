@@ -6,29 +6,37 @@ import * as pmtiles from 'pmtiles';
 
 const TASHKENT_CENTER: [number, number] = [69.2401, 41.2995];
 
-type PmtilesLayerKey = 'buildings' | 'green' | 'roads' | 'water';
+type OverlayKey = 'buildings' | 'green' | 'roads' | 'water' | 'grid';
+type PmtilesLayerKey = Exclude<OverlayKey, 'grid'>;
 
 const PMTILES_LAYER_KEYS: readonly PmtilesLayerKey[] = ['buildings', 'green', 'roads', 'water'];
 
-type LayerVisibility = Record<PmtilesLayerKey, boolean>;
+const OVERLAY_KEYS: readonly OverlayKey[] = [...PMTILES_LAYER_KEYS, 'grid'];
+
+type LayerVisibility = Record<OverlayKey, boolean>;
 
 const DEFAULT_LAYER_VISIBILITY: LayerVisibility = {
   buildings: true,
   green: true,
   roads: true,
   water: true,
+  grid: false,
 };
 
-const LAYER_META: Record<PmtilesLayerKey, { label: string }> = {
+const LAYER_META: Record<OverlayKey, { label: string }> = {
   buildings: { label: 'Buildings' },
   green: { label: 'Green' },
   roads: { label: 'Roads' },
   water: { label: 'Water' },
+  grid: { label: 'Grid metrics' },
 };
 
 const BUILDINGS_LAYER_ID = 'buildings-extrusion';
 const BUILDINGS_SELECTED_LAYER_ID = 'buildings-selected-extrusion';
 const BUILDINGS_HOVER_LAYER_ID = 'buildings-hover-extrusion';
+const GRID_SOURCE_ID = 'grid-metrics';
+const GRID_FILL_LAYER_ID = 'grid-metrics-fill';
+const GRID_OUTLINE_LAYER_ID = 'grid-metrics-outline';
 
 function joinUrlParts(a: string, b: string) {
   return `${a.replace(/\/+$/g, '')}/${b.replace(/^\/+/, '')}`;
@@ -42,6 +50,11 @@ function buildPmtilesUrls(baseDataUrl: string, runId: string): Record<PmtilesLay
     roads: `pmtiles://${joinUrlParts(tilesDir, 'roads.pmtiles')}`,
     water: `pmtiles://${joinUrlParts(tilesDir, 'water.pmtiles')}`,
   };
+}
+
+function buildGridMetricsUrl(baseDataUrl: string, runId: string, cell = 500) {
+  const metricsDir = joinUrlParts(joinUrlParts(baseDataUrl, runId), 'metrics');
+  return joinUrlParts(metricsDir, `grid_${cell}m_metrics.geojson`);
 }
 
 const BASEMAP_STYLE: StyleSpecification = {
@@ -80,11 +93,12 @@ function parseLayersParam(raw: string | null): LayerVisibility | null {
     green: false,
     roads: false,
     water: false,
+    grid: false,
   };
 
   for (const part of raw.split(',')) {
     const key = part.trim();
-    if (key === 'buildings' || key === 'green' || key === 'roads' || key === 'water') {
+    if (key === 'buildings' || key === 'green' || key === 'roads' || key === 'water' || key === 'grid') {
       next[key] = true;
     }
   }
@@ -93,7 +107,7 @@ function parseLayersParam(raw: string | null): LayerVisibility | null {
 }
 
 function serializeLayersParam(layers: LayerVisibility) {
-  return PMTILES_LAYER_KEYS.filter((k) => layers[k]).join(',');
+  return OVERLAY_KEYS.filter((k) => layers[k]).join(',');
 }
 
 type BuildingInfo = {
@@ -106,6 +120,19 @@ type HoverState = {
   x: number;
   y: number;
   info: BuildingInfo;
+};
+
+type GridInfo = {
+  cell_id: string;
+  cell_area_m2: number | null;
+  green_area_m2: number | null;
+  green_share: number | null;
+};
+
+type GridHoverState = {
+  x: number;
+  y: number;
+  info: GridInfo;
 };
 
 function asStringOrNull(v: unknown): string | null {
@@ -134,6 +161,18 @@ function getBuildingInfo(feature: MapGeoJSONFeature): BuildingInfo | null {
   };
 }
 
+function getGridInfo(feature: MapGeoJSONFeature): GridInfo | null {
+  const props = (feature.properties ?? {}) as Record<string, unknown>;
+  const cellId = asStringOrNull(props.cell_id);
+  if (!cellId) return null;
+  return {
+    cell_id: cellId,
+    cell_area_m2: asNumberOrNull(props.cell_area_m2),
+    green_area_m2: asNumberOrNull(props.green_area_m2),
+    green_share: asNumberOrNull(props.green_share),
+  };
+}
+
 export function MapClient() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<Map | null>(null);
@@ -158,6 +197,7 @@ export function MapClient() {
   const [layers, setLayers] = useState<LayerVisibility>(DEFAULT_LAYER_VISIBILITY);
 
   const [hover, setHover] = useState<HoverState | null>(null);
+  const [gridHover, setGridHover] = useState<GridHoverState | null>(null);
   const [selected, setSelected] = useState<BuildingInfo | null>(null);
 
   const layersRef = useRef(layers);
@@ -169,6 +209,11 @@ export function MapClient() {
   useEffect(() => {
     hoveredRef.current = hover;
   }, [hover]);
+
+  const gridHoveredRef = useRef(gridHover);
+  useEffect(() => {
+    gridHoveredRef.current = gridHover;
+  }, [gridHover]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -301,12 +346,14 @@ export function MapClient() {
       map.removeLayer(id);
     };
 
-    const removeSourceSafe = (id: PmtilesLayerKey) => {
+    const removeSourceSafe = (id: string) => {
       if (!map.getSource(id)) return;
       map.removeSource(id);
     };
 
     const teardownOverlays = () => {
+      removeLayerSafe(GRID_OUTLINE_LAYER_ID);
+      removeLayerSafe(GRID_FILL_LAYER_ID);
       removeLayerSafe(BUILDINGS_HOVER_LAYER_ID);
       removeLayerSafe(BUILDINGS_SELECTED_LAYER_ID);
       removeLayerSafe(BUILDINGS_LAYER_ID);
@@ -314,6 +361,7 @@ export function MapClient() {
       removeLayerSafe('green-fill');
       removeLayerSafe('water-fill');
 
+      removeSourceSafe(GRID_SOURCE_ID);
       removeSourceSafe('buildings');
       removeSourceSafe('roads');
       removeSourceSafe('green');
@@ -328,6 +376,7 @@ export function MapClient() {
       if (!protocol) return;
 
       const pmtilesUrls = buildPmtilesUrls(baseDataUrl, nextRunId);
+      const gridUrl = buildGridMetricsUrl(baseDataUrl, nextRunId, 500);
 
       // Register PMTiles archives so MapLibre can request TileJSON + tiles via the `pmtiles://` protocol.
       for (const url of Object.values(pmtilesUrls)) {
@@ -368,6 +417,10 @@ export function MapClient() {
       addSourceSafe('roads');
       addSourceSafe('buildings');
 
+      if (!map.getSource(GRID_SOURCE_ID)) {
+        map.addSource(GRID_SOURCE_ID, { type: 'geojson', data: gridUrl });
+      }
+
       const addLayerSafe = (layer: LayerSpecification) => {
         if (map.getLayer(layer.id)) return;
         map.addLayer(layer);
@@ -392,6 +445,47 @@ export function MapClient() {
         paint: {
           'fill-color': '#86efac',
           'fill-opacity': 0.45,
+        },
+      });
+
+      const gridShareExpr = ['coalesce', ['to-number', ['get', 'green_share']], 0] as never;
+
+      addLayerSafe({
+        id: GRID_FILL_LAYER_ID,
+        type: 'fill',
+        source: GRID_SOURCE_ID,
+        minzoom: 11,
+        paint: {
+          'fill-color': [
+            'interpolate',
+            ['linear'],
+            gridShareExpr,
+            0,
+            '#f3f4f6',
+            0.1,
+            '#dcfce7',
+            0.3,
+            '#86efac',
+            0.5,
+            '#4ade80',
+            0.7,
+            '#22c55e',
+            1,
+            '#15803d',
+          ] as never,
+          'fill-opacity': 0.35,
+        },
+      });
+
+      addLayerSafe({
+        id: GRID_OUTLINE_LAYER_ID,
+        type: 'line',
+        source: GRID_SOURCE_ID,
+        minzoom: 11,
+        paint: {
+          'line-color': '#111827',
+          'line-opacity': 0.22,
+          'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.2, 14, 0.8, 16, 1.4] as never,
         },
       });
 
@@ -462,6 +556,7 @@ export function MapClient() {
         teardownOverlays();
         clearSelection();
         clearHover();
+        setGridHover(null);
         setHint(
           'PMTiles overlays disabled. Set NEXT_PUBLIC_BASE_DATA_URL and NEXT_PUBLIC_RUN_ID (or use ?run_id=...) to enable buildings/roads/water/green.',
         );
@@ -473,6 +568,7 @@ export function MapClient() {
         setHint(null);
         clearSelection();
         clearHover();
+        setGridHover(null);
         teardownOverlays();
         ensureOverlaysForRun(runId);
         currentRunIdRef.current = runId;
@@ -481,8 +577,14 @@ export function MapClient() {
       // Apply per-layer visibility toggles.
       setLayerVisibility('water-fill', layers.water);
       setLayerVisibility('green-fill', layers.green);
+      setLayerVisibility(GRID_FILL_LAYER_ID, layers.grid);
+      setLayerVisibility(GRID_OUTLINE_LAYER_ID, layers.grid);
       setLayerVisibility('roads-line', layers.roads);
       setLayerVisibility(BUILDINGS_LAYER_ID, layers.buildings);
+
+      if (!layers.grid) {
+        setGridHover(null);
+      }
 
       if (!layers.buildings) {
         clearSelection();
@@ -552,26 +654,45 @@ export function MapClient() {
         const pt = lastHoverPointRef.current;
         if (!pt) return;
 
-        if (!layersRef.current.buildings || !map.getLayer(BUILDINGS_LAYER_ID)) {
-          if (hoveredRef.current) clearHover();
+        // Priority: buildings hover first, then grid metrics.
+        const canHoverBuildings = layersRef.current.buildings && Boolean(map.getLayer(BUILDINGS_LAYER_ID));
+
+        if (canHoverBuildings) {
+          const features = map.queryRenderedFeatures([pt.x, pt.y], { layers: [BUILDINGS_LAYER_ID] });
+          const feature = features[0];
+          if (feature) {
+            const info = getBuildingInfo(feature);
+            if (info) {
+              if (gridHoveredRef.current) setGridHover(null);
+              setHoverHighlight(info.id);
+              setHover({ x: pt.x, y: pt.y, info });
+              return;
+            }
+          }
+        }
+
+        if (hoveredRef.current) clearHover();
+
+        const canHoverGrid = layersRef.current.grid && Boolean(map.getLayer(GRID_FILL_LAYER_ID));
+        if (!canHoverGrid) {
+          if (gridHoveredRef.current) setGridHover(null);
           return;
         }
 
-        const features = map.queryRenderedFeatures([pt.x, pt.y], { layers: [BUILDINGS_LAYER_ID] });
-        const feature = features[0];
-        if (!feature) {
-          if (hoveredRef.current) clearHover();
+        const gridFeatures = map.queryRenderedFeatures([pt.x, pt.y], { layers: [GRID_FILL_LAYER_ID] });
+        const gridFeature = gridFeatures[0];
+        if (!gridFeature) {
+          if (gridHoveredRef.current) setGridHover(null);
           return;
         }
 
-        const info = getBuildingInfo(feature);
-        if (!info) {
-          if (hoveredRef.current) clearHover();
+        const gridInfo = getGridInfo(gridFeature);
+        if (!gridInfo) {
+          if (gridHoveredRef.current) setGridHover(null);
           return;
         }
 
-        setHoverHighlight(info.id);
-        setHover({ x: pt.x, y: pt.y, info });
+        setGridHover({ x: pt.x, y: pt.y, info: gridInfo });
       });
     };
 
@@ -603,7 +724,10 @@ export function MapClient() {
     map.on('click', onClick as never);
 
     const canvas = map.getCanvas();
-    const onCanvasMouseLeave = () => clearHover();
+    const onCanvasMouseLeave = () => {
+      clearHover();
+      setGridHover(null);
+    };
     canvas.addEventListener('mouseleave', onCanvasMouseLeave);
 
     return () => {
@@ -659,7 +783,7 @@ export function MapClient() {
         <div className="tvv-section">
           <div className="tvv-section__label">Layers</div>
           <div className="tvv-checkboxes">
-            {PMTILES_LAYER_KEYS.map((k) => (
+            {OVERLAY_KEYS.map((k) => (
               <label key={k} className="tvv-checkbox">
                 <input
                   type="checkbox"
@@ -687,6 +811,9 @@ export function MapClient() {
             <div className="tvv-legend__item">
               <span className="tvv-swatch tvv-swatch--roads" /> Roads
             </div>
+            <div className="tvv-legend__item">
+              <span className="tvv-swatch tvv-swatch--grid" /> Grid metrics
+            </div>
           </div>
         </div>
 
@@ -713,6 +840,25 @@ export function MapClient() {
           <div className="tvv-kv">
             <div className="tvv-kv__k">height_source</div>
             <div className="tvv-kv__v">{hover.info.height_source ?? 'null'}</div>
+          </div>
+        </div>
+      ) : gridHover ? (
+        <div className="tvv-tooltip" style={{ left: gridHover.x + 12, top: gridHover.y + 12 }}>
+          <div className="tvv-kv">
+            <div className="tvv-kv__k">cell_id</div>
+            <div className="tvv-kv__v">{gridHover.info.cell_id}</div>
+          </div>
+          <div className="tvv-kv">
+            <div className="tvv-kv__k">green_share</div>
+            <div className="tvv-kv__v">{gridHover.info.green_share ?? 'null'}</div>
+          </div>
+          <div className="tvv-kv">
+            <div className="tvv-kv__k">green_area_m2</div>
+            <div className="tvv-kv__v">{gridHover.info.green_area_m2 ?? 'null'}</div>
+          </div>
+          <div className="tvv-kv">
+            <div className="tvv-kv__k">cell_area_m2</div>
+            <div className="tvv-kv__v">{gridHover.info.cell_area_m2 ?? 'null'}</div>
           </div>
         </div>
       ) : null}

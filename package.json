@@ -16,6 +16,7 @@
     "data:osm:extract": "node packages/data/scripts/osm-extract.mjs",
     "data:buildings:heights": "node packages/data/scripts/buildings-heights.mjs",
     "data:buildings:lod": "node packages/data/scripts/buildings-lod.mjs",
+    "data:metrics:grid": "node packages/data/scripts/metrics-grid.mjs",
     "data:tiles:buildings": "node packages/data/scripts/tiles-buildings.mjs",
     "data:tiles:base": "node packages/data/scripts/tiles-base.mjs",
     "data:smoke": "node --test packages/data/test/aoi-grid-smoke.test.mjs",
