@@ -8,6 +8,8 @@
   "scripts": {
     "dev": "pnpm -C apps/web dev",
     "build": "pnpm -r build",
+    "data:manifest:validate": "node packages/data/scripts/manifest-validate.mjs",
+    "data:release:init": "node packages/data/scripts/release-init.mjs",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "format": "prettier -w ."
@@ -21,4 +23,3 @@
     "typescript": "^5.7.3"
   }
 }
-
