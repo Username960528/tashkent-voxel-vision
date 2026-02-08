@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type LayerSpecification, type Map, type MapGeoJSONFeature, type StyleSpecification } from 'maplibre-gl';
 import * as pmtiles from 'pmtiles';
+import { buildFacadePatternExpression, ensureFacadeImages } from './facadePatterns';
 
 const TASHKENT_CENTER: [number, number] = [69.2401, 41.2995];
 // WGS84 lon/lat bounds for clamping interaction to Tashkent by default.
@@ -190,6 +191,11 @@ export function MapClient() {
   const [mapLoaded, setMapLoaded] = useState(false);
   const [isUrlInitialized, setIsUrlInitialized] = useState(false);
 
+  const [pixelMode, setPixelMode] = useState(true);
+  // Fraction of the devicePixelRatio to render at when pixel mode is enabled.
+  // 1.0 means normal DPR rendering, 0.25 means heavy pixelation.
+  const [pixelScale, setPixelScale] = useState(0.35);
+
   const [hint, setHint] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(envRunId);
   const [draftRunId, setDraftRunId] = useState(envRunId ?? '');
@@ -316,6 +322,20 @@ export function MapClient() {
 
   useEffect(() => {
     if (!mapLoaded) return;
+    const map = mapRef.current;
+    if (!map) return;
+    if (typeof window === 'undefined') return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const clampedScale = Math.min(1, Math.max(0.15, pixelScale));
+    const nextRatio = dpr * (pixelMode ? clampedScale : 1);
+
+    map.setPixelRatio(nextRatio);
+    map.resize();
+  }, [mapLoaded, pixelMode, pixelScale]);
+
+  useEffect(() => {
+    if (!mapLoaded) return;
 
     const map = mapRef.current;
     if (!map) return;
@@ -383,6 +403,9 @@ export function MapClient() {
 
       const pmtilesUrls = buildPmtilesUrls(baseDataUrl, nextRunId);
       const gridUrl = buildGridMetricsUrl(baseDataUrl, nextRunId, 500);
+
+      // Facade textures are registered as runtime images; do this before any layers reference them.
+      ensureFacadeImages(map);
 
       // Register PMTiles archives so MapLibre can request TileJSON + tiles via the `pmtiles://` protocol.
       for (const url of Object.values(pmtilesUrls)) {
@@ -516,10 +539,11 @@ export function MapClient() {
         'source-layer': 'buildings',
         minzoom: 12,
         paint: {
-          'fill-extrusion-color': '#d1d5db',
+          'fill-extrusion-pattern': buildFacadePatternExpression() as never,
           'fill-extrusion-height': heightExpr,
           'fill-extrusion-base': 0,
           'fill-extrusion-opacity': 0.92,
+          'fill-extrusion-vertical-gradient': false,
         },
       });
 
@@ -751,7 +775,7 @@ export function MapClient() {
   }, [mapLoaded]);
 
   return (
-    <div className="tvv-map-root">
+    <div className={`tvv-map-root${pixelMode ? ' tvv-map-root--pixel' : ''}`}>
       <div ref={containerRef} className="tvv-map-canvas" />
 
       <div className="tvv-panel tvv-panel--left">
@@ -800,6 +824,32 @@ export function MapClient() {
               </label>
             ))}
           </div>
+        </div>
+
+        <div className="tvv-section">
+          <div className="tvv-section__label">Render</div>
+          <label className="tvv-checkbox">
+            <input type="checkbox" checked={pixelMode} onChange={() => setPixelMode((prev) => !prev)} />
+            <span>Pixel mode</span>
+          </label>
+          {pixelMode ? (
+            <div className="tvv-form-row">
+              <label className="tvv-label" htmlFor="tvv-pixel-scale">
+                Pixel scale
+              </label>
+              <input
+                id="tvv-pixel-scale"
+                className="tvv-range"
+                type="range"
+                min="0.15"
+                max="1"
+                step="0.05"
+                value={pixelScale}
+                onChange={(e) => setPixelScale(e.currentTarget.valueAsNumber)}
+              />
+              <div className="tvv-range__meta">{Math.round(pixelScale * 100)}%</div>
+            </div>
+          ) : null}
         </div>
 
         <div className="tvv-section">

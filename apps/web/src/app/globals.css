@@ -20,6 +20,11 @@ body {
   inset: 0;
 }
 
+.tvv-map-root--pixel .maplibregl-canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
 .tvv-panel {
   position: absolute;
   z-index: 10;
@@ -99,6 +104,17 @@ body {
 .tvv-input:focus {
   border-color: rgba(96, 165, 250, 0.9);
   box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.2);
+}
+
+.tvv-range {
+  width: 100%;
+  accent-color: #60a5fa;
+}
+
+.tvv-range__meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.78);
 }
 
 .tvv-btn {
