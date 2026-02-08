@@ -26,10 +26,24 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Setup SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.TVV_DEPLOY_SSH_KEY }}
+      - name: Validate deploy secrets
+        run: |
+          set -euo pipefail
+          test -n "${{ secrets.TVV_DEPLOY_HOST }}" || (echo "Missing secret: TVV_DEPLOY_HOST" >&2; exit 1)
+          test -n "${{ secrets.TVV_DEPLOY_USER }}" || (echo "Missing secret: TVV_DEPLOY_USER" >&2; exit 1)
+          test -n "${{ secrets.TVV_DEPLOY_SSH_KEY }}" || (echo "Missing secret: TVV_DEPLOY_SSH_KEY" >&2; exit 1)
+          printf '%s' "${{ secrets.TVV_DEPLOY_SSH_KEY }}" | grep -q 'BEGIN OPENSSH PRIVATE KEY' || (
+            echo "TVV_DEPLOY_SSH_KEY does not look like an OpenSSH private key (expected 'BEGIN OPENSSH PRIVATE KEY')" >&2
+            exit 1
+          )
+
+      - name: Write SSH key
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.TVV_DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
 
       - name: Add host key
         run: |
@@ -43,5 +57,4 @@ jobs:
           USER: ${{ secrets.TVV_DEPLOY_USER }}
         run: |
           set -euo pipefail
-          ssh -T -o BatchMode=yes "${USER}@${HOST}"
-
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -T "${USER}@${HOST}"

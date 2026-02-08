@@ -23,7 +23,7 @@ This repo can be deployed via GitHub Actions over SSH.
 Required GitHub repo secrets:
 - `TVV_DEPLOY_HOST`: VPS IP/hostname (example: `23.95.75.54`)
 - `TVV_DEPLOY_USER`: SSH username (example: `root`)
-- `TVV_DEPLOY_SSH_KEY`: private key used by Actions to SSH into the VPS
+- `TVV_DEPLOY_SSH_KEY`: OpenSSH private key used by Actions to SSH into the VPS (must include the full `BEGIN OPENSSH PRIVATE KEY` block)
 
 ## Workspace Layout
 - `apps/web`: Next.js web app (MapLibre UI)
