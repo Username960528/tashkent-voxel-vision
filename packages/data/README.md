@@ -30,6 +30,9 @@ pnpm data:buildings:lod --run_id=tashkent_2026-02-07
 pnpm data:tiles:buildings --run_id=tashkent_2026-02-07
 pnpm data:tiles:base --run_id=tashkent_2026-02-07
 
+# Isometric "whitebox" tile pyramid (conditioning input for pixel stylization, optional)
+pnpm data:iso:whitebox --run_id=tashkent_2026-02-07 --z_min=0 --z_max=2
+
 pnpm data:grid --run_id=tashkent_2026-02-07 --cell=500
 pnpm data:metrics:grid --run_id=tashkent_2026-02-07 --cell=500
 
@@ -42,6 +45,7 @@ Outputs (per release):
 - `vector/`: extracted GeoParquet layers (`buildings.parquet`, `roads.parquet`, `water.parquet`, `green.parquet`), plus optional `buildings_simplified.parquet`
 - `tiles/`: `*.pmtiles` layers for the web app
 - `metrics/`: `grid_500m_metrics.parquet` + `grid_500m_metrics.geojson` (web overlay)
+- `exports/` (optional): `exports/iso_whitebox/` tile pyramid (`tilejson.json` + `z/x/y.png`)
 - `raster/` (optional): Sentinel-2 NDVI composite + `green_mask_<year>.tif` (see `docs/time_slices.md`)
 
 Notes:
