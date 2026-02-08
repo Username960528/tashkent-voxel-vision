@@ -36,6 +36,7 @@ const LAYER_META: Record<OverlayKey, { label: string }> = {
 };
 
 const BUILDINGS_LAYER_ID = 'buildings-extrusion';
+const BUILDINGS_ROOF_LAYER_ID = 'buildings-roof-extrusion';
 const BUILDINGS_SELECTED_LAYER_ID = 'buildings-selected-extrusion';
 const BUILDINGS_HOVER_LAYER_ID = 'buildings-hover-extrusion';
 const GRID_SOURCE_ID = 'grid-metrics';
@@ -382,6 +383,7 @@ export function MapClient() {
       removeLayerSafe(GRID_FILL_LAYER_ID);
       removeLayerSafe(BUILDINGS_HOVER_LAYER_ID);
       removeLayerSafe(BUILDINGS_SELECTED_LAYER_ID);
+      removeLayerSafe(BUILDINGS_ROOF_LAYER_ID);
       removeLayerSafe(BUILDINGS_LAYER_ID);
       removeLayerSafe('roads-line');
       removeLayerSafe('green-fill');
@@ -540,9 +542,26 @@ export function MapClient() {
         minzoom: 12,
         paint: {
           'fill-extrusion-pattern': buildFacadePatternExpression() as never,
-          'fill-extrusion-height': heightExpr,
+          // Keep facades off the roof: render walls up to (height - roofThickness),
+          // and draw a plain roof cap layer above.
+          'fill-extrusion-height': ['max', 0, ['-', heightExpr, 0.8]] as never,
           'fill-extrusion-base': 0,
           'fill-extrusion-opacity': 0.92,
+          'fill-extrusion-vertical-gradient': false,
+        },
+      });
+
+      addLayerSafe({
+        id: BUILDINGS_ROOF_LAYER_ID,
+        type: 'fill-extrusion',
+        source: 'buildings',
+        'source-layer': 'buildings',
+        minzoom: 12,
+        paint: {
+          'fill-extrusion-color': '#e5e7eb',
+          'fill-extrusion-height': heightExpr,
+          'fill-extrusion-base': ['max', 0, ['-', heightExpr, 0.8]] as never,
+          'fill-extrusion-opacity': 0.95,
           'fill-extrusion-vertical-gradient': false,
         },
       });
@@ -611,6 +630,7 @@ export function MapClient() {
       setLayerVisibility(GRID_OUTLINE_LAYER_ID, layers.grid);
       setLayerVisibility('roads-line', layers.roads);
       setLayerVisibility(BUILDINGS_LAYER_ID, layers.buildings);
+      setLayerVisibility(BUILDINGS_ROOF_LAYER_ID, layers.buildings);
 
       if (!layers.grid) {
         setGridHover(null);
@@ -685,10 +705,14 @@ export function MapClient() {
         if (!pt) return;
 
         // Priority: buildings hover first, then grid metrics.
-        const canHoverBuildings = layersRef.current.buildings && Boolean(map.getLayer(BUILDINGS_LAYER_ID));
+        const canHoverBuildings =
+          layersRef.current.buildings && (Boolean(map.getLayer(BUILDINGS_LAYER_ID)) || Boolean(map.getLayer(BUILDINGS_ROOF_LAYER_ID)));
 
         if (canHoverBuildings) {
-          const features = map.queryRenderedFeatures([pt.x, pt.y], { layers: [BUILDINGS_LAYER_ID] });
+          const hoverLayers: string[] = [];
+          if (map.getLayer(BUILDINGS_ROOF_LAYER_ID)) hoverLayers.push(BUILDINGS_ROOF_LAYER_ID);
+          if (map.getLayer(BUILDINGS_LAYER_ID)) hoverLayers.push(BUILDINGS_LAYER_ID);
+          const features = map.queryRenderedFeatures([pt.x, pt.y], { layers: hoverLayers });
           const feature = features[0];
           if (feature) {
             const info = getBuildingInfo(feature);
@@ -727,12 +751,18 @@ export function MapClient() {
     };
 
     const onClick = (evt: { point: { x: number; y: number } }) => {
-      if (!layersRef.current.buildings || !map.getLayer(BUILDINGS_LAYER_ID)) {
+      if (
+        !layersRef.current.buildings ||
+        (!map.getLayer(BUILDINGS_LAYER_ID) && !map.getLayer(BUILDINGS_ROOF_LAYER_ID))
+      ) {
         clearSelection();
         return;
       }
 
-      const features = map.queryRenderedFeatures([evt.point.x, evt.point.y], { layers: [BUILDINGS_LAYER_ID] });
+      const clickLayers: string[] = [];
+      if (map.getLayer(BUILDINGS_ROOF_LAYER_ID)) clickLayers.push(BUILDINGS_ROOF_LAYER_ID);
+      if (map.getLayer(BUILDINGS_LAYER_ID)) clickLayers.push(BUILDINGS_LAYER_ID);
+      const features = map.queryRenderedFeatures([evt.point.x, evt.point.y], { layers: clickLayers });
       const feature = features[0];
 
       if (!feature) {
