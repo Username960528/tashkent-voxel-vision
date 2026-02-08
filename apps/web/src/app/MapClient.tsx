@@ -5,6 +5,9 @@ import maplibregl, { type LayerSpecification, type Map, type MapGeoJSONFeature, 
 import * as pmtiles from 'pmtiles';
 
 const TASHKENT_CENTER: [number, number] = [69.2401, 41.2995];
+// WGS84 lon/lat bounds for clamping interaction to Tashkent by default.
+// Keep in sync with `packages/data/scripts/lib/aoi-catalog.mjs` (MVP duplication is intentional).
+const TASHKENT_BBOX: [number, number, number, number] = [69.103, 41.168, 69.397, 41.434];
 
 type OverlayKey = 'buildings' | 'green' | 'roads' | 'water' | 'grid';
 type PmtilesLayerKey = Exclude<OverlayKey, 'grid'>;
@@ -59,19 +62,15 @@ function buildGridMetricsUrl(baseDataUrl: string, runId: string, cell = 500) {
 
 const BASEMAP_STYLE: StyleSpecification = {
   version: 8,
-  sources: {
-    osm: {
-      type: 'raster',
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-      tileSize: 256,
-      attribution: '© OpenStreetMap contributors',
-    },
-  },
+  sources: {},
   layers: [
     {
-      id: 'osm',
-      type: 'raster',
-      source: 'osm',
+      id: 'background',
+      type: 'background',
+      paint: {
+        // Warm paper-like base to keep focus on the city layers.
+        'background-color': '#f6f2e8',
+      },
     },
   ],
 };
@@ -271,9 +270,16 @@ export function MapClient() {
       style: BASEMAP_STYLE,
       center: TASHKENT_CENTER,
       zoom: 13,
+      minZoom: 10.5,
+      maxZoom: 19,
       pitch: 60,
       bearing: -25,
       hash: true,
+      renderWorldCopies: false,
+      maxBounds: [
+        [TASHKENT_BBOX[0], TASHKENT_BBOX[1]],
+        [TASHKENT_BBOX[2], TASHKENT_BBOX[3]],
+      ],
     });
 
     mapRef.current = map;
