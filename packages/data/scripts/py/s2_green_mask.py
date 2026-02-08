@@ -372,24 +372,24 @@ def main():
                                     ndvi[valid] = (nir[valid] - red[valid]) / den[valid]
                                     ndvi_stack[i, :, :] = ndvi
 
-                            valid_counts = np.sum(np.isfinite(ndvi_stack), axis=0)
-                            ndvi_med = np.nanmedian(ndvi_stack, axis=0).astype(np.float32, copy=False)
+                                valid_counts = np.sum(np.isfinite(ndvi_stack), axis=0)
+                                ndvi_med = np.nanmedian(ndvi_stack, axis=0).astype(np.float32, copy=False)
 
-                            ok = (valid_counts >= min_valid) & (aoi_mask_chunk == 1)
-                            ndvi_out = np.full((ch, cw), ndvi_nodata, dtype=np.float32)
-                            ndvi_out[ok] = ndvi_med[ok]
+                                ok = (valid_counts >= min_valid) & (aoi_mask_chunk == 1)
+                                ndvi_out = np.full((ch, cw), ndvi_nodata, dtype=np.float32)
+                                ndvi_out[ok] = ndvi_med[ok]
 
-                            ndvi_dst.write(ndvi_out, 1, window=out_win)
+                                ndvi_dst.write(ndvi_out, 1, window=out_win)
 
-                            # Raw mask (morphology applied after mosaic to avoid tile seams).
-                            m = np.full((ch, cw), mask_nodata, dtype=np.uint8)
-                            m[ok] = (ndvi_med[ok] >= threshold).astype(np.uint8)
-                            mask_full[row_off : row_off + ch, col_off : col_off + cw] = m
+                                # Raw mask (morphology applied after mosaic to avoid tile seams).
+                                m = np.full((ch, cw), mask_nodata, dtype=np.uint8)
+                                m[ok] = (ndvi_med[ok] >= threshold).astype(np.uint8)
+                                mask_full[row_off : row_off + ch, col_off : col_off + cw] = m
 
-                            # Write raw tile mask.
-                            mask_profile = _make_output_profile(out_crs, win_transform, w, h, "uint8", int(mask_nodata))
-                            with rasterio.open(mask_tile_path, "w", **mask_profile) as mask_dst:
-                                mask_dst.write(mask_full, 1)
+                        # Write raw tile mask.
+                        mask_profile = _make_output_profile(out_crs, win_transform, w, h, "uint8", int(mask_nodata))
+                        with rasterio.open(mask_tile_path, "w", **mask_profile) as mask_dst:
+                            mask_dst.write(mask_full, 1)
 
         if not tile_ndvi_paths or not tile_mask_paths:
             raise SystemExit("No tile outputs produced (AOI may be empty or outside scene footprints)")
