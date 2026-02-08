@@ -6,6 +6,9 @@
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1"
   },
+  "devDependencies": {
+    "@types/node": "^22.10.0"
+  },
   "scripts": {
     "lint": "eslint -c ../../.eslintrc.cjs .",
     "test": "node --test test/*.test.mjs",
