@@ -191,12 +191,11 @@ export function ensureFacadeImages(map: Map) {
 }
 
 export function buildFacadePatternExpression() {
-  const idNum = [
-    'coalesce',
-    ['to-number', ['at', 1, ['split', ['to-string', ['get', 'id']], '/']]],
-    ['to-number', ['get', 'id']],
-    0,
-  ] as const;
+  // Avoid runtime errors: expressions like `["at", ...]` throw when out-of-bounds.
+  // Some datasets store `id` as a plain number/string without a `type/id` prefix.
+  const idStr = ['to-string', ['get', 'id']] as const;
+  const numericStr = ['slice', idStr, ['+', ['index-of', '/', idStr], 1]] as const;
+  const idNum = ['to-number', numericStr, 0] as const;
 
   const variant = ['%', idNum, 3] as const;
 
@@ -211,4 +210,3 @@ export function buildFacadePatternExpression() {
     ['image', 'tvv-facade-c'],
   ] as const;
 }
-
