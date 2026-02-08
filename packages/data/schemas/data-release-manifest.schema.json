@@ -82,6 +82,89 @@
               "type": ["boolean", "null"]
             }
           }
+        },
+        "sentinel2": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            },
+            "stac_api": {
+              "type": "string",
+              "format": "uri"
+            },
+            "collection": {
+              "type": "string",
+              "minLength": 1
+            },
+            "datetime_start": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "datetime_end": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "years": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "max_cloud_cover_percent": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "bands": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "red": { "type": "string", "minLength": 1 },
+                "nir": { "type": "string", "minLength": 1 },
+                "scl": { "type": "string", "minLength": 1 }
+              }
+            },
+            "masking": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "method": { "type": "string", "minLength": 1 },
+                "scl_exclude": {
+                  "type": "array",
+                  "items": { "type": "integer" }
+                }
+              }
+            },
+            "composite": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "ndvi_method": { "type": "string", "minLength": 1 },
+                "min_valid_observations": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "classification": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "green_ndvi_threshold": { "type": "number" }
+              }
+            },
+            "output_crs": {
+              "type": "string",
+              "pattern": "^EPSG:[0-9]+$"
+            },
+            "generated_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "notes": {
+              "type": "string"
+            }
+          }
         }
       }
     },
