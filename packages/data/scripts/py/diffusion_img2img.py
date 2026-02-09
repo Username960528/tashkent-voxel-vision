@@ -68,6 +68,17 @@ def main():
     ap.add_argument("--device", default="auto", help="auto|cuda|mps|cpu (default: auto)")
     args = ap.parse_args()
 
+    # HuggingFace Hub uses HF_TOKEN; allow our `.env` to provide HUGGINGFACE_HUB_TOKEN.
+    if os.environ.get("HUGGINGFACE_HUB_TOKEN") and not os.environ.get("HF_TOKEN"):
+        os.environ["HF_TOKEN"] = os.environ["HUGGINGFACE_HUB_TOKEN"]
+    # Speed up large model downloads when `hf_transfer` is available.
+    try:
+        import hf_transfer  # noqa: F401
+
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    except Exception:
+        pass
+
     if not os.path.exists(args.in_png):
         raise SystemExit(f"missing input: {args.in_png}")
     if not (math.isfinite(args.strength) and 0.0 < args.strength <= 1.0):
@@ -82,7 +93,7 @@ def main():
     # Heavy imports only when actually running this optional script.
     try:
         import torch  # noqa: F401
-        from diffusers import AutoPipelineForImage2Image  # noqa: F401
+        from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionXLImg2ImgPipeline  # noqa: F401
     except Exception as e:
         msg = str(e)
         raise SystemExit(
@@ -93,7 +104,7 @@ def main():
         )
 
     import torch
-    from diffusers import AutoPipelineForImage2Image
+    from diffusers import StableDiffusionImg2ImgPipeline, StableDiffusionXLImg2ImgPipeline
 
     device = _pick_device(args.device, torch)
     dtype = _pick_dtype(device, torch)
@@ -103,10 +114,43 @@ def main():
 
     t0 = time.time()
 
-    pipe = AutoPipelineForImage2Image.from_pretrained(
-        args.model,
-        torch_dtype=dtype,
-    )
+    # Load fp16 weights when available to reduce download size and memory usage.
+    # Some repos (like SDXL) provide `*.fp16.safetensors` variants.
+    from_pretrained_kwargs = {"torch_dtype": dtype, "use_safetensors": True}
+    if dtype == torch.float16:
+        from_pretrained_kwargs["variant"] = "fp16"
+
+    # Prefer explicit pipelines over AutoPipelineForImage2Image because AutoPipeline imports many optional
+    # pipelines and can break when some downstream dependencies are missing or renamed.
+    #
+    # We try SDXL first (works for most "xl" models), then fall back to SD 1.x.
+    pipe = None
+    pipe_kind = None
+    errors = []
+    for kind, cls in (
+        ("sdxl_img2img", StableDiffusionXLImg2ImgPipeline),
+        ("sd_img2img", StableDiffusionImg2ImgPipeline),
+    ):
+        try:
+            try:
+                pipe = cls.from_pretrained(args.model, **from_pretrained_kwargs)
+            except Exception as e:
+                # If fp16 variant isn't present, retry without `variant`.
+                if from_pretrained_kwargs.get("variant"):
+                    kwargs2 = dict(from_pretrained_kwargs)
+                    kwargs2.pop("variant", None)
+                    pipe = cls.from_pretrained(args.model, **kwargs2)
+                else:
+                    raise e
+            pipe_kind = kind
+            break
+        except Exception as e:
+            errors.append(f"{kind}: {e}")
+            pipe = None
+            pipe_kind = None
+    if pipe is None:
+        joined = "\n".join(errors) if errors else "(no details)"
+        raise SystemExit(f"Failed to load img2img pipeline for model '{args.model}':\n{joined}")
     # Make it easier to run on consumer hardware.
     try:
         pipe.enable_attention_slicing()
@@ -171,6 +215,7 @@ def main():
         "in_png": os.path.abspath(args.in_png),
         "out_png": os.path.abspath(args.out_png),
         "model": args.model,
+        "pipeline": pipe_kind,
         "lora": lora if lora else None,
         "lora_scale": lora_scale if lora else None,
         "prompt": args.prompt,

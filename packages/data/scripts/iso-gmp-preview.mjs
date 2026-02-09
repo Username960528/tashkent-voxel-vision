@@ -13,7 +13,8 @@ import { findRepoRoot } from './lib/repo-root.mjs';
 
 function printHelp() {
   console.log(`Usage:
-  pnpm data:iso:gmp:preview --run_id=<id> [--width=1024 --height=1024] [--heading=45 --pitch=-35] [--max_sse=4]
+  pnpm data:iso:gmp:preview --run_id=<id> [--width=1024 --height=1024] [--heading=45 --pitch=-35] [--max_sse=4] [--bbox_scale=1]
+                           [--timeout_ms=30000 --poll_ms=250 --stable_frames=6]
 
 Environment:
   GMP_API_KEY              Google Maps Platform key with Photorealistic 3D Tiles enabled (required)
@@ -28,6 +29,7 @@ Notes:
   - This renders a single isometric-ish preview image from Google Photorealistic 3D Tiles over the AOI bbox
     stored in the release manifest. It is intended as a conditioning input for a later pixel-art stylizer.
   - Attribution/credits are captured into preview.json. Do not commit API keys; they are read from env only.
+  - Use --bbox_scale < 1 to zoom in around the AOI center (useful for inspecting building-level detail).
 `);
 }
 
@@ -77,10 +79,23 @@ async function findChromeExecutablePath() {
   return '';
 }
 
+function scaleBbox(bbox, scale) {
+  const [west, south, east, north] = bbox;
+  const cx = (west + east) / 2;
+  const cy = (south + north) / 2;
+  const halfW = ((east - west) * scale) / 2;
+  const halfH = ((north - south) * scale) / 2;
+  return [cx - halfW, cy - halfH, cx + halfW, cy + halfH];
+}
+
 function buildCesiumHtml({ apiKey, config }) {
   // Keep everything self-contained; config is injected directly into the HTML.
   // Cesium is loaded from CDN to avoid bundling it into the repo.
-  const initScript = `window.__GMP_API_KEY__ = ${JSON.stringify(apiKey)}; window.__GMP_CONFIG__ = ${JSON.stringify(config)};`;
+  // Use a CDN that serves Cesium worker scripts with CORS headers; WebWorkers require CORS.
+  const CESIUM_BASE_URL = 'https://unpkg.com/cesium@1.116.0/Build/Cesium/';
+  // Note: Playwright page.setContent runs at about:blank, so Cesium can't infer its asset/worker base URL.
+  // Explicitly set CESIUM_BASE_URL so workers/Assets resolve correctly and we don't silently fall back.
+  const initScript = `window.CESIUM_BASE_URL = ${JSON.stringify(CESIUM_BASE_URL)}; window.__GMP_API_KEY__ = ${JSON.stringify(apiKey)}; window.__GMP_CONFIG__ = ${JSON.stringify(config)};`;
   return `<!doctype html>
 <html>
   <head>
@@ -88,7 +103,7 @@ function buildCesiumHtml({ apiKey, config }) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>TVV GMP Preview</title>
     <link
-      href="https://cesium.com/downloads/cesiumjs/releases/1.116/Build/Cesium/Widgets/widgets.css"
+      href="https://unpkg.com/cesium@1.116.0/Build/Cesium/Widgets/widgets.css"
       rel="stylesheet"
     />
     <style>
@@ -121,7 +136,7 @@ function buildCesiumHtml({ apiKey, config }) {
   <body>
     <div id="cesiumContainer"></div>
     <div id="creditContainer"></div>
-    <script src="https://cesium.com/downloads/cesiumjs/releases/1.116/Build/Cesium/Cesium.js"></script>
+    <script src="https://unpkg.com/cesium@1.116.0/Build/Cesium/Cesium.js"></script>
     <script>
       (async () => {
         const apiKey = window.__GMP_API_KEY__;
@@ -130,6 +145,9 @@ function buildCesiumHtml({ apiKey, config }) {
         if (!cfg || !Array.isArray(cfg.bbox) || cfg.bbox.length !== 4) throw new Error('Missing/invalid __GMP_CONFIG__.bbox');
 
         const creditEl = document.getElementById('creditContainer');
+
+        // Ensure Cesium worker/asset URLs resolve correctly when running from about:blank.
+        try { Cesium.buildModuleUrl.setBaseUrl(window.CESIUM_BASE_URL); } catch {}
 
         const viewer = new Cesium.Viewer('cesiumContainer', {
           animation: false,
@@ -230,6 +248,7 @@ export async function renderIsoGmpPreview({
   headingDeg = 45,
   pitchDeg = -35,
   maxSse = 4,
+  bboxScale = 1,
   timeoutMs = 30_000,
   pollMs = 250,
   stableFrames = 6,
@@ -245,6 +264,9 @@ export async function renderIsoGmpPreview({
   if (!Number.isFinite(headingDeg)) throw new Error(`Invalid --heading: ${String(headingDeg)}`);
   if (!Number.isFinite(pitchDeg)) throw new Error(`Invalid --pitch: ${String(pitchDeg)}`);
   if (!Number.isFinite(maxSse) || maxSse <= 0) throw new Error(`Invalid --max_sse: ${String(maxSse)}`);
+  if (!Number.isFinite(bboxScale) || bboxScale <= 0 || bboxScale > 1) {
+    throw new Error(`Invalid --bbox_scale: ${String(bboxScale)} (expected 0 < scale <= 1)`);
+  }
 
   const apiKey = process.env.GMP_API_KEY || process.env.GOOGLE_MAPS_PLATFORM_API_KEY || '';
   if (!apiKey) {
@@ -264,6 +286,7 @@ export async function renderIsoGmpPreview({
   if (!Array.isArray(bbox) || bbox.length !== 4 || !bbox.every((n) => typeof n === 'number' && Number.isFinite(n))) {
     throw new Error('Invalid manifest: missing aoi.bbox');
   }
+  const bboxUsed = bboxScale === 1 ? bbox : scaleBbox(bbox, bboxScale);
 
   const outDir = path.join(runRoot, 'exports', 'iso_gmp_preview');
   await fs.mkdir(outDir, { recursive: true });
@@ -274,7 +297,7 @@ export async function renderIsoGmpPreview({
   const html = buildCesiumHtml({
     apiKey,
     config: {
-      bbox,
+      bbox: bboxUsed,
       tileset_url: 'https://tile.googleapis.com/v1/3dtiles/root.json',
       heading_deg: headingDeg,
       pitch_deg: pitchDeg,
@@ -304,7 +327,9 @@ export async function renderIsoGmpPreview({
 
     await page.setContent(html, { waitUntil: 'load' });
 
-    await page.waitForFunction('window.__GMP_DONE__ === true', { timeout: timeoutMs + 10_000 });
+    // Playwright signature is waitForFunction(fn, arg?, options). Passing an object as the 2nd param is
+    // ambiguous (arg vs options), so we pass `null` for arg to ensure options are applied.
+    await page.waitForFunction('window.__GMP_DONE__ === true', null, { timeout: timeoutMs + 10_000 });
     const result = await page.evaluate(() => window.__GMP_RESULT__);
     if (!result?.ok) {
       throw new Error(`GMP preview render failed: ${String(result?.error ?? 'unknown error')}`);
@@ -331,6 +356,8 @@ export async function renderIsoGmpPreview({
         heading_deg: headingDeg,
         pitch_deg: pitchDeg,
         max_sse: maxSse,
+        bbox_scale: bboxScale,
+        bbox_used: bboxUsed,
       },
       capture: result,
       attribution_note:
@@ -380,6 +407,10 @@ async function main() {
   const heading = Number(typeof args.heading === 'string' ? args.heading : args.heading_deg);
   const pitch = Number(typeof args.pitch === 'string' ? args.pitch : args.pitch_deg);
   const maxSse = Number(typeof args.max_sse === 'string' ? args.max_sse : args.maxSse);
+  const bboxScale = Number(typeof args.bbox_scale === 'string' ? args.bbox_scale : args.bboxScale);
+  const timeoutMs = Number(typeof args.timeout_ms === 'string' ? args.timeout_ms : args.timeoutMs);
+  const pollMs = Number(typeof args.poll_ms === 'string' ? args.poll_ms : args.pollMs);
+  const stableFrames = Number(typeof args.stable_frames === 'string' ? args.stable_frames : args.stableFrames);
 
   const repoRoot = (await findRepoRoot(process.cwd())) ?? process.cwd();
 
@@ -392,6 +423,10 @@ async function main() {
       headingDeg: Number.isFinite(heading) ? heading : 45,
       pitchDeg: Number.isFinite(pitch) ? pitch : -35,
       maxSse: Number.isFinite(maxSse) ? maxSse : 4,
+      bboxScale: Number.isFinite(bboxScale) ? bboxScale : 1,
+      timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 30_000,
+      pollMs: Number.isFinite(pollMs) ? pollMs : 250,
+      stableFrames: Number.isFinite(stableFrames) ? stableFrames : 6,
     });
     console.log(JSON.stringify(result));
   } catch (err) {
