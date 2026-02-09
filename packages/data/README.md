@@ -40,6 +40,10 @@ pnpm data:iso:gmp:preview --run_id=tashkent_2026-02-07 --width=1024 --height=102
 # CPU pixel-art stylizer (baseline / fallback, optional)
 pnpm data:iso:stylize:pixel --run_id=tashkent_2026-02-07
 
+# No-training stylization baseline (diffusion img2img, optional)
+# - Requires a separate venv (auto-managed) at packages/data/.venv-diffusion
+pnpm data:iso:stylize:diffusion --run_id=tashkent_2026-02-07 --model=<hf_id_or_local_path>
+
 pnpm data:grid --run_id=tashkent_2026-02-07 --cell=500
 pnpm data:metrics:grid --run_id=tashkent_2026-02-07 --cell=500
 
