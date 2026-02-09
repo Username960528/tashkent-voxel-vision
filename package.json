@@ -22,6 +22,7 @@
     "data:green:build": "node packages/data/scripts/green-build.mjs",
     "data:iso:whitebox": "node packages/data/scripts/iso-whitebox.mjs",
     "data:iso:gmp:preview": "node packages/data/scripts/iso-gmp-preview.mjs",
+    "data:iso:stylize:pixel": "node packages/data/scripts/iso-stylize-pixel.mjs",
     "data:serve": "node packages/data/scripts/serve-data.mjs",
     "data:smoke": "node --test packages/data/test/aoi-grid-smoke.test.mjs",
     "lint": "pnpm -r lint",
