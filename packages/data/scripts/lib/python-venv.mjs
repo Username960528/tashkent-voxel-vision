@@ -50,7 +50,13 @@ async function sha256TextFile(filePath) {
 }
 
 export function getVenvPaths(repoRoot) {
-  const venvDir = path.join(repoRoot, 'packages', 'data', '.venv');
+  return getVenvPathsWithName(repoRoot, '.venv');
+}
+
+export function getVenvPathsWithName(repoRoot, venvDirName) {
+  const safeName = typeof venvDirName === 'string' && venvDirName.length > 0 ? venvDirName : '.venv';
+  // Keep venvs under packages/data to avoid polluting the repo root and to ensure path stability.
+  const venvDir = path.join(repoRoot, 'packages', 'data', safeName);
   const pythonBin =
     process.platform === 'win32'
       ? path.join(venvDir, 'Scripts', 'python.exe')
@@ -58,8 +64,8 @@ export function getVenvPaths(repoRoot) {
   return { venvDir, pythonBin };
 }
 
-export async function ensurePythonVenv(repoRoot) {
-  const { venvDir, pythonBin } = getVenvPaths(repoRoot);
+export async function ensurePythonVenv(repoRoot, { venvDirName = '.venv', requirementsPath = '' } = {}) {
+  const { venvDir, pythonBin } = getVenvPathsWithName(repoRoot, venvDirName);
   await fs.mkdir(path.dirname(venvDir), { recursive: true });
 
   // Cross-test/process guard: Node's test runner may execute multiple files in parallel.
@@ -72,14 +78,20 @@ export async function ensurePythonVenv(repoRoot) {
       run('python3', ['-m', 'venv', ...(dirExists ? ['--upgrade'] : []), venvDir]);
     }
 
-    const requirementsPath = path.join(repoRoot, 'packages', 'data', 'scripts', 'py', 'requirements.txt');
+    const reqPath =
+      requirementsPath && path.isAbsolute(requirementsPath)
+        ? requirementsPath
+        : path.join(
+            repoRoot,
+            requirementsPath && requirementsPath.length > 0 ? requirementsPath : path.join('packages', 'data', 'scripts', 'py', 'requirements.txt'),
+          );
     const markerPath = path.join(venvDir, '.tvv_requirements_sha256');
 
-    const reqHash = await sha256TextFile(requirementsPath);
+    const reqHash = await sha256TextFile(reqPath);
     const existing = (await fileExists(markerPath)) ? (await fs.readFile(markerPath, 'utf8')).trim() : '';
     if (existing !== reqHash) {
       run(pythonBin, ['-m', 'pip', 'install', '--upgrade', 'pip']);
-      run(pythonBin, ['-m', 'pip', 'install', '-r', requirementsPath]);
+      run(pythonBin, ['-m', 'pip', 'install', '-r', reqPath]);
       await fs.writeFile(markerPath, `${reqHash}\n`, 'utf8');
     }
   } finally {
@@ -89,7 +101,7 @@ export async function ensurePythonVenv(repoRoot) {
   return { pythonBin };
 }
 
-export async function runPython({ repoRoot, scriptPath, args }) {
-  const { pythonBin } = await ensurePythonVenv(repoRoot);
+export async function runPython({ repoRoot, scriptPath, args, venvDirName = '.venv', requirementsPath = '' }) {
+  const { pythonBin } = await ensurePythonVenv(repoRoot, { venvDirName, requirementsPath });
   run(pythonBin, [scriptPath, ...args]);
 }

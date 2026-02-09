@@ -1,0 +1,16 @@
+# Diffusion-based stylization dependencies (optional).
+# This is installed into a separate venv (`packages/data/.venv-diffusion`) to avoid bloating the default data venv.
+#
+# Notes:
+# - On Apple Silicon, PyTorch can use MPS (`--device=mps`) but may be slower than a CUDA GPU.
+# - Version pins here are intentionally loose; if you need strict reproducibility, freeze these once you pick a stack.
+
+numpy==1.26.4
+Pillow==10.4.0
+
+torch>=2.2.0
+diffusers>=0.27.0
+transformers>=4.37.0
+accelerate>=0.25.0
+safetensors>=0.4.0
+
