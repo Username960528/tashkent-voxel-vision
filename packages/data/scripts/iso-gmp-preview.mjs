@@ -77,9 +77,10 @@ async function findChromeExecutablePath() {
   return '';
 }
 
-function buildCesiumHtml() {
-  // Keep everything self-contained; config is injected via page.addInitScript().
+function buildCesiumHtml({ apiKey, config }) {
+  // Keep everything self-contained; config is injected directly into the HTML.
   // Cesium is loaded from CDN to avoid bundling it into the repo.
+  const initScript = `window.__GMP_API_KEY__ = ${JSON.stringify(apiKey)}; window.__GMP_CONFIG__ = ${JSON.stringify(config)};`;
   return `<!doctype html>
 <html>
   <head>
@@ -115,6 +116,7 @@ function buildCesiumHtml() {
         z-index: 10;
       }
     </style>
+    <script>${initScript}</script>
   </head>
   <body>
     <div id="cesiumContainer"></div>
@@ -269,7 +271,19 @@ export async function renderIsoGmpPreview({
   const outPng = path.join(outDir, 'preview.png');
   const outJson = path.join(outDir, 'preview.json');
 
-  const html = buildCesiumHtml();
+  const html = buildCesiumHtml({
+    apiKey,
+    config: {
+      bbox,
+      tileset_url: 'https://tile.googleapis.com/v1/3dtiles/root.json',
+      heading_deg: headingDeg,
+      pitch_deg: pitchDeg,
+      max_sse: maxSse,
+      timeout_ms: timeoutMs,
+      poll_ms: pollMs,
+      stable_frames: stableFrames,
+    },
+  });
   const browser = await chromium.launch({
     executablePath: chromePath,
     headless: true,
@@ -286,19 +300,6 @@ export async function renderIsoGmpPreview({
     page.on('pageerror', (err) => {
       // eslint-disable-next-line no-console
       console.error(`[pageerror] ${String(err)}`);
-    });
-
-    await page.addInitScript({
-      content: `window.__GMP_API_KEY__ = ${JSON.stringify(apiKey)}; window.__GMP_CONFIG__ = ${JSON.stringify({
-        bbox,
-        tileset_url: 'https://tile.googleapis.com/v1/3dtiles/root.json',
-        heading_deg: headingDeg,
-        pitch_deg: pitchDeg,
-        max_sse: maxSse,
-        timeout_ms: timeoutMs,
-        poll_ms: pollMs,
-        stable_frames: stableFrames,
-      })};`,
     });
 
     await page.setContent(html, { waitUntil: 'load' });
