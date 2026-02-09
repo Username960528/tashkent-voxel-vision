@@ -37,6 +37,9 @@ pnpm data:iso:whitebox --run_id=tashkent_2026-02-07 --z_min=0 --z_max=2
 # - Requires env GMP_API_KEY and a local Chrome/Chromium (set CHROME_EXECUTABLE_PATH if auto-detect fails)
 pnpm data:iso:gmp:preview --run_id=tashkent_2026-02-07 --width=1024 --height=1024
 
+# CPU pixel-art stylizer (baseline / fallback, optional)
+pnpm data:iso:stylize:pixel --run_id=tashkent_2026-02-07
+
 pnpm data:grid --run_id=tashkent_2026-02-07 --cell=500
 pnpm data:metrics:grid --run_id=tashkent_2026-02-07 --cell=500
 
