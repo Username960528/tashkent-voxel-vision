@@ -18,6 +18,8 @@ function printHelp() {
 Options:
   --in             Input PNG (run-relative). Default: exports/iso_gmp_preview/preview.png
   --out            Output PNG (run-relative). Default: exports/iso_gmp_preview/preview_sd.png
+  --lora           Optional LoRA weights (HF repo id or local path)
+  --lora_scale     LoRA scale (default: 0.8)
   --prompt         Positive prompt (optional)
   --negative       Negative prompt (optional)
   --strength       0..1 (default: 0.35)
@@ -62,6 +64,8 @@ export async function stylizeDiffusion({
   model,
   inRel = 'exports/iso_gmp_preview/preview.png',
   outRel = 'exports/iso_gmp_preview/preview_sd.png',
+  lora = '',
+  loraScale = 0.8,
   prompt = '',
   negative = '',
   strength = 0.35,
@@ -103,6 +107,7 @@ export async function stylizeDiffusion({
       reportPath,
       '--model',
       model,
+      ...(lora ? ['--lora', lora, '--lora_scale', String(loraScale)] : []),
       ...(prompt ? ['--prompt', prompt] : []),
       ...(negative ? ['--negative', negative] : []),
       '--strength',
@@ -139,6 +144,8 @@ async function main() {
 
   const runId = typeof args.run_id === 'string' ? args.run_id : '';
   const model = typeof args.model === 'string' ? args.model : '';
+  const lora = typeof args.lora === 'string' ? args.lora : '';
+  const loraScale = Number(typeof args.lora_scale === 'string' ? args.lora_scale : args.loraScale);
 
   const inRel = ensureRelPath(typeof args.in === 'string' ? args.in : '') ?? 'exports/iso_gmp_preview/preview.png';
   const outRel = ensureRelPath(typeof args.out === 'string' ? args.out : '') ?? 'exports/iso_gmp_preview/preview_sd.png';
@@ -160,6 +167,8 @@ async function main() {
       model,
       inRel,
       outRel,
+      lora,
+      loraScale: Number.isFinite(loraScale) ? loraScale : 0.8,
       prompt,
       negative,
       strength: Number.isFinite(strength) ? strength : 0.35,

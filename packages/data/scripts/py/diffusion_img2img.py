@@ -49,6 +49,8 @@ def main():
     ap.add_argument("--report_json", default="", help="Optional JSON report output path")
 
     ap.add_argument("--model", required=True, help="Diffusers model id or local path")
+    ap.add_argument("--lora", default="", help="Optional LoRA weights (HF repo id or local path)")
+    ap.add_argument("--lora_scale", type=float, default=0.8, help="LoRA scale (default: 0.8)")
     ap.add_argument(
         "--prompt",
         default="isometric pixel art city, crisp pixels, game art, clean outlines, detailed buildings, high quality",
@@ -74,6 +76,8 @@ def main():
         raise SystemExit("--steps must be > 0")
     if not (math.isfinite(args.guidance) and args.guidance >= 0.0):
         raise SystemExit("--guidance must be >= 0")
+    if not (math.isfinite(args.lora_scale) and 0.0 <= args.lora_scale <= 2.0):
+        raise SystemExit("--lora_scale must be in [0, 2]")
 
     # Heavy imports only when actually running this optional script.
     try:
@@ -113,6 +117,16 @@ def main():
     except Exception:
         pass
 
+    lora = (args.lora or "").strip()
+    lora_scale = float(args.lora_scale)
+    cross_attention_kwargs = None
+    if lora:
+        try:
+            pipe.load_lora_weights(lora)
+            cross_attention_kwargs = {"scale": lora_scale}
+        except Exception as e:
+            raise SystemExit(f"Failed to load LoRA weights '{lora}': {e}")
+
     pipe = pipe.to(device)
 
     generator = None
@@ -125,7 +139,7 @@ def main():
         # Some backends don't accept a device-bound generator.
         generator = torch.manual_seed(seed)
 
-    out = pipe(
+    call_kwargs = dict(
         prompt=args.prompt,
         negative_prompt=args.negative,
         image=img8,
@@ -133,7 +147,16 @@ def main():
         num_inference_steps=int(args.steps),
         guidance_scale=float(args.guidance),
         generator=generator,
-    ).images[0]
+    )
+    if cross_attention_kwargs is not None:
+        call_kwargs["cross_attention_kwargs"] = cross_attention_kwargs
+
+    try:
+        out = pipe(**call_kwargs).images[0]
+    except TypeError:
+        # Some pipelines may not accept `cross_attention_kwargs`. Fall back to scale=1.0 behavior.
+        call_kwargs.pop("cross_attention_kwargs", None)
+        out = pipe(**call_kwargs).images[0]
 
     # Match the original size for downstream pixel post-processing.
     if out.size != orig_size:
@@ -148,6 +171,8 @@ def main():
         "in_png": os.path.abspath(args.in_png),
         "out_png": os.path.abspath(args.out_png),
         "model": args.model,
+        "lora": lora if lora else None,
+        "lora_scale": lora_scale if lora else None,
         "prompt": args.prompt,
         "negative": args.negative,
         "strength": float(args.strength),
@@ -175,4 +200,3 @@ if __name__ == "__main__":
         main()
     except BrokenPipeError:
         sys.exit(1)
-
