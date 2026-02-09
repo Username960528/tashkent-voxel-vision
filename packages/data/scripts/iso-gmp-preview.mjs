@@ -7,6 +7,7 @@ import { chromium } from 'playwright-core';
 
 import { parseArgs } from './lib/args.mjs';
 import { buildArtifact, getRunPaths, upsertArtifacts } from './lib/artifacts.mjs';
+import { loadDotenv } from './lib/env.mjs';
 import { validateManifest } from './lib/manifest-schema.mjs';
 import { findRepoRoot } from './lib/repo-root.mjs';
 
@@ -233,6 +234,10 @@ export async function renderIsoGmpPreview({
 }) {
   assertSafeRunId(runId);
   if (typeof repoRoot !== 'string' || repoRoot.length === 0) throw new Error('Missing repoRoot');
+
+  // Load .env/.env.local so users don't have to export keys on every run.
+  await loadDotenv({ repoRoot });
+
   if (!Number.isFinite(width) || width <= 0) throw new Error(`Invalid --width: ${String(width)}`);
   if (!Number.isFinite(height) || height <= 0) throw new Error(`Invalid --height: ${String(height)}`);
   if (!Number.isFinite(headingDeg)) throw new Error(`Invalid --heading: ${String(headingDeg)}`);
@@ -409,4 +414,3 @@ const isEntrypoint = (() => {
 if (isEntrypoint) {
   await main();
 }
-

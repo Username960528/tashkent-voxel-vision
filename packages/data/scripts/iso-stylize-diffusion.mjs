@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parseArgs } from './lib/args.mjs';
 import { addFilesToManifest, getRunPaths } from './lib/artifacts.mjs';
+import { loadDotenv } from './lib/env.mjs';
 import { runPython } from './lib/python-venv.mjs';
 import { findRepoRoot } from './lib/repo-root.mjs';
 
@@ -72,6 +73,9 @@ export async function stylizeDiffusion({
   assertSafeRunId(runId);
   if (typeof repoRoot !== 'string' || repoRoot.length === 0) throw new Error('Missing repoRoot');
   if (typeof model !== 'string' || model.trim().length === 0) throw new Error('Missing required --model');
+
+  // Load .env/.env.local for optional HF tokens, etc.
+  await loadDotenv({ repoRoot });
 
   const { runRoot, manifestPath } = getRunPaths(repoRoot, runId);
 
@@ -186,4 +190,3 @@ const isEntrypoint = (() => {
 if (isEntrypoint) {
   await main();
 }
-

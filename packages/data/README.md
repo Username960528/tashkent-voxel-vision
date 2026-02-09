@@ -17,6 +17,9 @@ brew install osmium-tool tippecanoe pmtiles
 ## Typical Run (Tashkent)
 Pick a `run_id` (example: `tashkent_2026-02-07`), then:
 
+Tip: you can create a local `.env` (ignored by git) so you don't have to `export` keys on every run.
+See `.env.example`.
+
 ```bash
 pnpm data:release:init --run_id=tashkent_2026-02-07 --aoi=tashkent
 pnpm data:aoi:write --run_id=tashkent_2026-02-07 --aoi=tashkent
