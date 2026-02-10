@@ -40,12 +40,31 @@ pnpm data:iso:whitebox --run_id=tashkent_2026-02-07 --z_min=0 --z_max=2
 # - Requires env GMP_API_KEY and a local Chrome/Chromium (set CHROME_EXECUTABLE_PATH if auto-detect fails)
 pnpm data:iso:gmp:preview --run_id=tashkent_2026-02-07 --width=1024 --height=1024
 
+# Google Photorealistic 3D Tiles (tile pack over AOI bbox, optional)
+# - Renders an NxN grid under exports/iso_gmp_tiles/grid_<N>/raw/0/x/y.png
+pnpm data:iso:gmp:tiles --run_id=tashkent_2026-02-07 --grid=3 --width=768 --height=768 --overlap=0.10
+
 # CPU pixel-art stylizer (baseline / fallback, optional)
 pnpm data:iso:stylize:pixel --run_id=tashkent_2026-02-07
 
 # No-training stylization baseline (diffusion img2img, optional)
 # - Requires a separate venv (auto-managed) at packages/data/.venv-diffusion
 pnpm data:iso:stylize:diffusion --run_id=tashkent_2026-02-07 --model=<hf_id_or_local_path>
+
+# Batch diffusion stylization for a directory (tile packs)
+pnpm data:iso:stylize:diffusion:dir \
+  --run_id=tashkent_2026-02-07 \
+  --in_dir=exports/iso_gmp_tiles/grid_3/raw \
+  --model=stabilityai/stable-diffusion-xl-base-1.0 \
+  --lora=nerijs/pixel-art-xl --lora_scale=0.8 \
+  --device=mps --strength=0.30 --steps=12 --guidance=4.5 --seed=0
+
+# Batch CPU pixel stylizer (post-process) for a directory (tile packs)
+pnpm data:iso:stylize:pixel:dir \
+  --run_id=tashkent_2026-02-07 \
+  --in_dir=exports/iso_gmp_tiles/grid_3/sd \
+  --out_dir=exports/iso_gmp_tiles/grid_3/pixel \
+  --pixel_scale=0.18 --palette=32 --dither --edge_threshold=40 --edge_alpha=0.9 --edge_thickness=2
 
 pnpm data:grid --run_id=tashkent_2026-02-07 --cell=500
 pnpm data:metrics:grid --run_id=tashkent_2026-02-07 --cell=500
