@@ -27,7 +27,11 @@ def _pick_device(requested, torch):
 
 def _pick_dtype(device, torch):
     # fp16 saves memory; for CPU keep fp32.
-    if device in ("cuda", "mps"):
+    #
+    # NOTE: On Apple Silicon (MPS), SDXL fp16 can produce NaNs/black outputs with some torch/diffusers
+    # versions. Default to fp32 for correctness. If we later add a CLI dtype override, mps+fp16 can be
+    # re-enabled for experimentation.
+    if device == "cuda":
         return torch.float16
     return torch.float32
 
