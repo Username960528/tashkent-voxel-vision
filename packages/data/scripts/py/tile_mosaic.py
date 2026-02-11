@@ -13,33 +13,38 @@ def _ensure_dir(p):
     os.makedirs(p, exist_ok=True)
 
 
-def _find_grid(in_dir):
+def _find_index_sets(in_dir):
     z0 = os.path.join(in_dir, "0")
     if not os.path.isdir(z0):
         raise ValueError(f"missing tiles dir: {z0} (expected 0/x/y.png)")
 
-    xs = []
+    x_vals = []
     for name in os.listdir(z0):
         p = os.path.join(z0, name)
         if os.path.isdir(p) and name.isdigit():
-            xs.append(int(name))
-    if not xs:
+            x_vals.append(int(name))
+    if not x_vals:
         raise ValueError(f"no x dirs found under: {z0}")
+    x_vals = sorted(set(x_vals))
 
-    max_x = max(xs)
-    max_y = -1
-    for x in xs:
+    y_vals = set()
+    for x in x_vals:
         xdir = os.path.join(z0, str(x))
         for fn in os.listdir(xdir):
             if fn.lower().endswith(".png"):
                 base = fn[:-4]
                 if base.isdigit():
-                    max_y = max(max_y, int(base))
-    if max_y < 0:
+                    y_vals.add(int(base))
+    if not y_vals:
         raise ValueError(f"no y pngs found under: {z0}/<x>/")
+    return x_vals, sorted(y_vals)
 
-    # Assumes a dense 0..grid-1 range.
-    return max(max_x, max_y) + 1
+
+def _resolve_index_sets(x_auto, y_auto, grid_arg):
+    if grid_arg and grid_arg > 0:
+        v = list(range(int(grid_arg)))
+        return v, v
+    return x_auto, y_auto
 
 
 def _crop_margin_px(size_px, overlap):
@@ -60,22 +65,25 @@ def _safe_open_tile(tile_path, target_size, mode):
     return tile
 
 
-def _blend_mosaic(in_dir, grid, w, h, mx, my, mode, bg, feather_px):
+def _blend_mosaic(in_dir, x_vals, y_vals, w, h, mx, my, mode, bg, feather_px):
     cw = max(1, w - 2 * mx)
     ch = max(1, h - 2 * my)
 
-    has_tile = [[False for _ in range(grid)] for _ in range(grid)]
-    for y in range(grid):
-        for x in range(grid):
+    width = len(x_vals)
+    height = len(y_vals)
+
+    has_tile = [[False for _ in range(width)] for _ in range(height)]
+    for iy, y in enumerate(y_vals):
+        for ix, x in enumerate(x_vals):
             tile_path = os.path.join(in_dir, "0", str(x), f"{y}.png")
-            has_tile[y][x] = os.path.exists(tile_path)
+            has_tile[iy][ix] = os.path.exists(tile_path)
 
     bx = max(0, min(mx, int(feather_px) if feather_px > 0 else int(round(mx * 0.75))))
     by = max(0, min(my, int(feather_px) if feather_px > 0 else int(round(my * 0.75))))
 
     channels = 3 if mode == "RGB" else 4
-    out_w = cw * grid
-    out_h = ch * grid
+    out_w = cw * width
+    out_h = ch * height
     accum = np.zeros((out_h, out_w, channels), dtype=np.float32)
     wsum = np.zeros((out_h, out_w, 1), dtype=np.float32)
 
@@ -86,17 +94,17 @@ def _blend_mosaic(in_dir, grid, w, h, mx, my, mode, bg, feather_px):
         bg_arr = np.array([bg_rgb[0], bg_rgb[1], bg_rgb[2]], dtype=np.float32)
 
     missing = 0
-    for y in range(grid):
-        for x in range(grid):
+    for iy, y in enumerate(y_vals):
+        for ix, x in enumerate(x_vals):
             tile_path = os.path.join(in_dir, "0", str(x), f"{y}.png")
-            if not has_tile[y][x]:
+            if not has_tile[iy][ix]:
                 missing += 1
                 continue
 
-            has_left = x > 0 and has_tile[y][x - 1]
-            has_right = x < grid - 1 and has_tile[y][x + 1]
-            has_top = y > 0 and has_tile[y - 1][x]
-            has_bottom = y < grid - 1 and has_tile[y + 1][x]
+            has_left = ix > 0 and has_tile[iy][ix - 1]
+            has_right = ix < width - 1 and has_tile[iy][ix + 1]
+            has_top = iy > 0 and has_tile[iy - 1][ix]
+            has_bottom = iy < height - 1 and has_tile[iy + 1][ix]
 
             lx = bx if has_left else 0
             rx = bx if has_right else 0
@@ -130,8 +138,8 @@ def _blend_mosaic(in_dir, grid, w, h, mx, my, mode, bg, feather_px):
                 ramp = np.linspace(1.0, 0.0, byy, endpoint=False, dtype=np.float32)
                 weight[ph - byy : ph, :] *= ramp[:, None]
 
-            x0 = x * cw - lx
-            y0 = y * ch - ty
+            x0 = ix * cw - lx
+            y0 = iy * ch - ty
             x1 = x0 + pw
             y1 = y0 + ph
 
@@ -185,11 +193,20 @@ def main():
     if args.feather_px < 0:
         raise SystemExit("--feather_px must be >= 0")
 
-    grid = int(args.grid) if args.grid else int(_find_grid(args.in_dir))
+    x_auto, y_auto = _find_index_sets(args.in_dir)
+    x_vals, y_vals = _resolve_index_sets(x_auto, y_auto, int(args.grid))
 
-    first = os.path.join(args.in_dir, "0", "0", "0.png")
-    if not os.path.exists(first):
-        raise SystemExit(f"missing expected first tile: {first}")
+    first = None
+    for y in y_vals:
+        for x in x_vals:
+            candidate = os.path.join(args.in_dir, "0", str(x), f"{y}.png")
+            if os.path.exists(candidate):
+                first = candidate
+                break
+        if first:
+            break
+    if not first:
+        raise SystemExit(f"no readable tiles under: {args.in_dir}/0/<x>/<y>.png")
 
     img0 = Image.open(first)
     w, h = img0.size
@@ -209,7 +226,8 @@ def main():
     if args.mode == "blend":
         canvas, missing, cw, ch, blend_x, blend_y = _blend_mosaic(
             in_dir=args.in_dir,
-            grid=grid,
+            x_vals=x_vals,
+            y_vals=y_vals,
             w=w,
             h=h,
             mx=mx,
@@ -219,10 +237,10 @@ def main():
             feather_px=args.feather_px,
         )
     else:
-        canvas = Image.new(mode, (cw * grid, ch * grid), bg)
+        canvas = Image.new(mode, (cw * len(x_vals), ch * len(y_vals)), bg)
         missing = 0
-        for y in range(grid):
-            for x in range(grid):
+        for iy, y in enumerate(y_vals):
+            for ix, x in enumerate(x_vals):
                 tile_path = os.path.join(args.in_dir, "0", str(x), f"{y}.png")
                 if not os.path.exists(tile_path):
                     missing += 1
@@ -230,15 +248,23 @@ def main():
                 tile = _safe_open_tile(tile_path, (w, h), mode)
                 if mx or my:
                     tile = tile.crop((mx, my, w - mx, h - my))
-                canvas.paste(tile, (x * cw, y * ch))
+                canvas.paste(tile, (ix * cw, iy * ch))
 
     _ensure_dir(os.path.dirname(os.path.abspath(args.out_png)))
     canvas.save(args.out_png, "PNG")
 
+    grid_side = max(len(x_vals), len(y_vals))
     report = {
         "in_dir": os.path.abspath(args.in_dir),
         "out_png": os.path.abspath(args.out_png),
-        "grid": int(grid),
+        "grid": int(grid_side),
+        "grid_xy": {"x": int(len(x_vals)), "y": int(len(y_vals))},
+        "index_ranges": {
+            "x_min": int(min(x_vals)),
+            "x_max": int(max(x_vals)),
+            "y_min": int(min(y_vals)),
+            "y_max": int(max(y_vals)),
+        },
         "overlap": float(args.overlap),
         "mode": args.mode,
         "feather_px": int(args.feather_px),
@@ -246,7 +272,7 @@ def main():
         "tile_size": {"w": int(w), "h": int(h)},
         "crop_margin_px": {"x": int(mx), "y": int(my)},
         "cropped_tile_size": {"w": int(cw), "h": int(ch)},
-        "mosaic_size": {"w": int(cw * grid), "h": int(ch * grid)},
+        "mosaic_size": {"w": int(cw * len(x_vals)), "h": int(ch * len(y_vals))},
         "missing_tiles": int(missing),
     }
 
