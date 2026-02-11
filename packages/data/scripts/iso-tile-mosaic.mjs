@@ -9,7 +9,7 @@ import { findRepoRoot } from './lib/repo-root.mjs';
 
 function printHelp() {
   console.log(`Usage:
-  pnpm data:iso:mosaic --run_id=<id> --tiles_dir=<run-rel-dir> [--layer=pixel|sd|raw]
+  pnpm data:iso:mosaic --run_id=<id> --tiles_dir=<run-rel-dir> [--layer=<layer_name>]
                        [--mode=crop|blend] [--feather_px=0] [--out=<run-rel-file.png>]
 
 Example:
@@ -57,7 +57,7 @@ export async function buildIsoMosaic({
   assertSafeRunId(runId);
   if (typeof repoRoot !== 'string' || repoRoot.length === 0) throw new Error('Missing repoRoot');
   if (typeof tilesDirRel !== 'string' || tilesDirRel.trim().length === 0) throw new Error('Missing required --tiles_dir');
-  if (!['raw', 'sd', 'pixel'].includes(layer)) throw new Error(`Invalid --layer: ${String(layer)}`);
+  if (!/^[a-zA-Z0-9._-]+$/.test(layer)) throw new Error(`Invalid --layer: ${String(layer)}`);
   if (!['crop', 'blend'].includes(mode)) throw new Error(`Invalid --mode: ${String(mode)}`);
   if (!Number.isFinite(featherPx) || featherPx < 0) throw new Error(`Invalid --feather_px: ${String(featherPx)}`);
 
