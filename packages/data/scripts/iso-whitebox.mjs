@@ -11,6 +11,7 @@ function printHelp() {
   console.log(`Usage:
   pnpm data:iso:whitebox --run_id=<id> [--z_min=0 --z_max=2] [--tile_size=512] [--ppm=0.06] [--height_scale=1.6]
                          [--bbox_scale=1] [--bbox_center_lon=<lon> --bbox_center_lat=<lat>]
+                         [--min_area_m2=16] [--outline_opacity=0.18]
 
 Inputs:
   data/releases/<run_id>/vector/buildings_simplified.parquet (preferred)
@@ -110,6 +111,8 @@ export async function renderIsoWhitebox({
   bboxScale = 1,
   bboxCenterLon = null,
   bboxCenterLat = null,
+  minAreaM2 = 16,
+  outlineOpacity = 0.18,
   skipEmpty = false,
   maxTiles = 0,
 }) {
@@ -121,6 +124,10 @@ export async function renderIsoWhitebox({
   if (!Number.isFinite(tileSize) || tileSize <= 0) throw new Error(`Invalid --tile_size: ${String(tileSize)}`);
   if (!Number.isFinite(ppm) || ppm <= 0) throw new Error(`Invalid --ppm: ${String(ppm)}`);
   if (!Number.isFinite(heightScale) || heightScale <= 0) throw new Error(`Invalid --height_scale: ${String(heightScale)}`);
+  if (!Number.isFinite(minAreaM2) || minAreaM2 < 0) throw new Error(`Invalid --min_area_m2: ${String(minAreaM2)}`);
+  if (!Number.isFinite(outlineOpacity) || outlineOpacity < 0 || outlineOpacity > 1) {
+    throw new Error(`Invalid --outline_opacity: ${String(outlineOpacity)}`);
+  }
   if (!Number.isFinite(maxTiles) || maxTiles < 0) throw new Error(`Invalid --max_tiles: ${String(maxTiles)}`);
 
   const { runRoot, manifestPath } = getRunPaths(repoRoot, runId);
@@ -171,6 +178,10 @@ export async function renderIsoWhitebox({
       String(ppm),
       '--height_scale',
       String(heightScale),
+      '--min_area_m2',
+      String(minAreaM2),
+      '--outline_opacity',
+      String(outlineOpacity),
       ...(skipEmpty ? ['--skip_empty'] : []),
       ...(maxTiles ? ['--max_tiles', String(maxTiles)] : []),
       '--report_json',
@@ -216,6 +227,8 @@ async function main() {
   const bboxScale = Number(typeof args.bbox_scale === 'string' ? args.bbox_scale : args.bboxScale);
   const bboxCenterLon = Number(typeof args.bbox_center_lon === 'string' ? args.bbox_center_lon : args.bboxCenterLon);
   const bboxCenterLat = Number(typeof args.bbox_center_lat === 'string' ? args.bbox_center_lat : args.bboxCenterLat);
+  const minAreaM2 = Number(typeof args.min_area_m2 === 'string' ? args.min_area_m2 : args.minAreaM2);
+  const outlineOpacity = Number(typeof args.outline_opacity === 'string' ? args.outline_opacity : args.outlineOpacity);
   const skipEmpty = Boolean(args.skip_empty ?? args.skipEmpty);
   const maxTiles = Number(typeof args.max_tiles === 'string' ? args.max_tiles : args.maxTiles);
 
@@ -233,6 +246,8 @@ async function main() {
       bboxScale: Number.isFinite(bboxScale) ? bboxScale : 1,
       bboxCenterLon: Number.isFinite(bboxCenterLon) ? bboxCenterLon : null,
       bboxCenterLat: Number.isFinite(bboxCenterLat) ? bboxCenterLat : null,
+      minAreaM2: Number.isFinite(minAreaM2) ? minAreaM2 : 16,
+      outlineOpacity: Number.isFinite(outlineOpacity) ? outlineOpacity : 0.18,
       skipEmpty,
       maxTiles: Number.isFinite(maxTiles) ? maxTiles : 0,
     });
