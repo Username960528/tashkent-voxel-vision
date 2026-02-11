@@ -64,7 +64,7 @@ pnpm data:iso:stylize:pixel:dir \
   --run_id=tashkent_2026-02-07 \
   --in_dir=exports/iso_gmp_tiles/grid_3/sd \
   --out_dir=exports/iso_gmp_tiles/grid_3/pixel \
-  --pixel_scale=0.18 --palette=32 --dither --edge_threshold=40 --edge_alpha=0.9 --edge_thickness=2
+  --pixel_scale=0.22 --palette=64 --dither --edge_threshold=112 --edge_alpha=0.28 --edge_thickness=1
 
 # Stitch a quick mosaic for visual QA (optional)
 pnpm data:iso:mosaic --run_id=tashkent_2026-02-07 --tiles_dir=exports/iso_gmp_tiles/grid_3 --layer=pixel
