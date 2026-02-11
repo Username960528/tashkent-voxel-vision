@@ -10,6 +10,7 @@ import { findRepoRoot } from './lib/repo-root.mjs';
 function printHelp() {
   console.log(`Usage:
   pnpm data:iso:whitebox --run_id=<id> [--z_min=0 --z_max=2] [--tile_size=512] [--ppm=0.06] [--height_scale=1.6]
+                         [--bbox_scale=1] [--bbox_center_lon=<lon> --bbox_center_lat=<lat>]
 
 Inputs:
   data/releases/<run_id>/vector/buildings_simplified.parquet (preferred)
@@ -25,6 +26,7 @@ Notes:
   - This is the first step of the \"isometric NYC\"-style pipeline: produce a deterministic geometry render
     per tile, which later becomes the conditioning input for image-to-image stylization.
   - By default we write empty tiles too (for predictable pyramid coverage). Use --skip_empty to omit them.
+  - Use --bbox_scale < 1 to render a smaller neighborhood around AOI center (or custom --bbox_center_*).
 `);
 }
 
@@ -46,6 +48,57 @@ function assertSafeRunId(runId) {
   }
 }
 
+function clamp(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+function scaleBboxAroundCenter({ bbox, scale, centerLon = null, centerLat = null }) {
+  const [minLon, minLat, maxLon, maxLat] = bbox;
+  if (!Number.isFinite(scale) || scale <= 0) throw new Error(`Invalid --bbox_scale: ${String(scale)}`);
+  if (Math.abs(scale - 1) < 1e-12) return bbox.slice();
+
+  const fullW = maxLon - minLon;
+  const fullH = maxLat - minLat;
+  const outW = fullW * scale;
+  const outH = fullH * scale;
+
+  const cx = clamp(Number.isFinite(centerLon) ? centerLon : (minLon + maxLon) / 2, minLon, maxLon);
+  const cy = clamp(Number.isFinite(centerLat) ? centerLat : (minLat + maxLat) / 2, minLat, maxLat);
+
+  let outMinLon = cx - outW / 2;
+  let outMaxLon = cx + outW / 2;
+  let outMinLat = cy - outH / 2;
+  let outMaxLat = cy + outH / 2;
+
+  if (outMinLon < minLon) {
+    outMaxLon += minLon - outMinLon;
+    outMinLon = minLon;
+  }
+  if (outMaxLon > maxLon) {
+    outMinLon -= outMaxLon - maxLon;
+    outMaxLon = maxLon;
+  }
+  if (outMinLat < minLat) {
+    outMaxLat += minLat - outMinLat;
+    outMinLat = minLat;
+  }
+  if (outMaxLat > maxLat) {
+    outMinLat -= outMaxLat - maxLat;
+    outMaxLat = maxLat;
+  }
+
+  outMinLon = clamp(outMinLon, minLon, maxLon);
+  outMaxLon = clamp(outMaxLon, minLon, maxLon);
+  outMinLat = clamp(outMinLat, minLat, maxLat);
+  outMaxLat = clamp(outMaxLat, minLat, maxLat);
+
+  if (!(outMinLon < outMaxLon && outMinLat < outMaxLat)) {
+    throw new Error('Computed bbox after scaling is invalid');
+  }
+
+  return [outMinLon, outMinLat, outMaxLon, outMaxLat];
+}
+
 export async function renderIsoWhitebox({
   repoRoot,
   runId,
@@ -54,6 +107,9 @@ export async function renderIsoWhitebox({
   tileSize = 512,
   ppm = 0.06,
   heightScale = 1.6,
+  bboxScale = 1,
+  bboxCenterLon = null,
+  bboxCenterLat = null,
   skipEmpty = false,
   maxTiles = 0,
 }) {
@@ -74,6 +130,12 @@ export async function renderIsoWhitebox({
   if (!Array.isArray(bbox) || bbox.length !== 4 || !bbox.every((n) => typeof n === 'number' && Number.isFinite(n))) {
     throw new Error('Invalid manifest: missing aoi.bbox');
   }
+  const bboxUsed = scaleBboxAroundCenter({
+    bbox,
+    scale: Number.isFinite(bboxScale) ? bboxScale : 1,
+    centerLon: bboxCenterLon,
+    centerLat: bboxCenterLat,
+  });
 
   const inCandidates = [
     path.join(runRoot, 'vector', 'buildings_simplified.parquet'),
@@ -98,7 +160,7 @@ export async function renderIsoWhitebox({
       '--out_dir',
       outDir,
       '--bbox',
-      bbox.join(','),
+      bboxUsed.join(','),
       '--tile_size',
       String(tileSize),
       '--z_min',
@@ -131,6 +193,7 @@ export async function renderIsoWhitebox({
   return {
     inParquet,
     outDir,
+    bboxUsed,
     tileCount,
     tilejsonRel: path.relative(runRoot, tilejsonAbs).replaceAll('\\', '/'),
     reportRel: path.relative(runRoot, reportPath).replaceAll('\\', '/'),
@@ -150,6 +213,9 @@ async function main() {
   const tileSize = Number(typeof args.tile_size === 'string' ? args.tile_size : args.tileSize);
   const ppm = Number(typeof args.ppm === 'string' ? args.ppm : args.pixels_per_meter);
   const heightScale = Number(typeof args.height_scale === 'string' ? args.height_scale : args.heightScale);
+  const bboxScale = Number(typeof args.bbox_scale === 'string' ? args.bbox_scale : args.bboxScale);
+  const bboxCenterLon = Number(typeof args.bbox_center_lon === 'string' ? args.bbox_center_lon : args.bboxCenterLon);
+  const bboxCenterLat = Number(typeof args.bbox_center_lat === 'string' ? args.bbox_center_lat : args.bboxCenterLat);
   const skipEmpty = Boolean(args.skip_empty ?? args.skipEmpty);
   const maxTiles = Number(typeof args.max_tiles === 'string' ? args.max_tiles : args.maxTiles);
 
@@ -164,6 +230,9 @@ async function main() {
       tileSize: Number.isFinite(tileSize) ? tileSize : 512,
       ppm: Number.isFinite(ppm) ? ppm : 0.06,
       heightScale: Number.isFinite(heightScale) ? heightScale : 1.6,
+      bboxScale: Number.isFinite(bboxScale) ? bboxScale : 1,
+      bboxCenterLon: Number.isFinite(bboxCenterLon) ? bboxCenterLon : null,
+      bboxCenterLat: Number.isFinite(bboxCenterLat) ? bboxCenterLat : null,
       skipEmpty,
       maxTiles: Number.isFinite(maxTiles) ? maxTiles : 0,
     });
@@ -189,4 +258,3 @@ const isEntrypoint = (() => {
 if (isEntrypoint) {
   await main();
 }
-
