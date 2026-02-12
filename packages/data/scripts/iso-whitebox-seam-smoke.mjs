@@ -29,7 +29,8 @@ Important options:
   --z_min=0 --z_max=0 --tile_size=1024 --ppm=0.09 --height_scale=2.1 --overlap=0.10
   --bbox_scale=0.12 --min_area_m2=30 --outline_opacity=0.06
   --lora=<hf_id_or_path> --lora_scale=0.8 --strength=0.30 --steps=12 --guidance=4.5 --seed=0 --device=auto
-  --seam_strength=0.14 --seam_context=0 --mask_half=16 --write_half=20 --harmonize_half=12 --max_seams=0
+  --seam_strength=0.14 --seam_context=0 --mask_half=16 --write_half=20 --harmonize_half=12 --intersection_pass=1 --intersection_mask_half=10 --intersection_write_half=24 --max_intersections=0 --max_seams=0
+  --seam_mosaic_mode=blend --seam_mosaic_feather=24
   --max_images=0
 `);
 }
@@ -72,7 +73,13 @@ export async function runIsoWhiteboxSeamSmoke({
   maskHalf = 16,
   writeHalf = 20,
   harmonizeHalf = 12,
+  intersectionPass = 1,
+  intersectionMaskHalf = 10,
+  intersectionWriteHalf = 24,
+  maxIntersections = 0,
   maxSeams = 0,
+  seamMosaicMode = 'blend',
+  seamMosaicFeather = 24,
   maxImages = 0,
 }) {
   if (typeof runId !== 'string' || runId.length === 0) throw new Error('Missing required --run_id');
@@ -176,6 +183,10 @@ export async function runIsoWhiteboxSeamSmoke({
     maskHalf,
     writeHalf,
     harmonizeHalf,
+    intersectionPass,
+    intersectionMaskHalf,
+    intersectionWriteHalf,
+    maxIntersections,
     maxSeams,
     seed,
     device,
@@ -186,8 +197,8 @@ export async function runIsoWhiteboxSeamSmoke({
     runId,
     tilesDirRel,
     layer: seamLayer,
-    mode: 'crop',
-    featherPx: 0,
+    mode: seamMosaicMode,
+    featherPx: seamMosaicFeather,
     outRel: seamMosaicOut,
   });
 
@@ -210,8 +221,8 @@ export async function runIsoWhiteboxSeamSmoke({
     runId,
     tilesDirRel,
     layer: pixelLayer,
-    mode: 'crop',
-    featherPx: 0,
+    mode: seamMosaicMode,
+    featherPx: seamMosaicFeather,
     outRel: pixelMosaicOut,
   });
 
@@ -226,6 +237,9 @@ export async function runIsoWhiteboxSeamSmoke({
     seams_total: Number(seamReport?.seams_total ?? 0),
     seams_processed: Number(seamReport?.seams_processed ?? 0),
     seams_skipped: Number(seamReport?.seams_skipped ?? 0),
+    intersections_total: Number(seamReport?.intersections_total ?? 0),
+    intersections_processed: Number(seamReport?.intersections_processed ?? 0),
+    intersections_skipped: Number(seamReport?.intersections_skipped ?? 0),
     suspicious_seams_count: suspiciousSeams.length,
     suspicious_seams: suspiciousSeams,
     artifacts: {
@@ -234,6 +248,8 @@ export async function runIsoWhiteboxSeamSmoke({
       mosaic_sd_whitebox_seam: seamMosaic.outRel,
       mosaic_pixel_whitebox_seam: pixelMosaic.outRel,
       seam_report: seam.reportRel,
+      seam_mosaic_mode: seamMosaicMode,
+      seam_mosaic_feather: seamMosaicFeather,
     },
   };
   await fs.writeFile(qualityReportAbs, `${JSON.stringify(qualityReport, null, 2)}\n`, 'utf8');
@@ -252,6 +268,9 @@ export async function runIsoWhiteboxSeamSmoke({
     seamsTotal: qualityReport.seams_total,
     seamsProcessed: qualityReport.seams_processed,
     seamsSkipped: qualityReport.seams_skipped,
+    intersectionsTotal: qualityReport.intersections_total,
+    intersectionsProcessed: qualityReport.intersections_processed,
+    intersectionsSkipped: qualityReport.intersections_skipped,
     suspiciousSeams: qualityReport.suspicious_seams_count,
   };
 }
@@ -297,7 +316,13 @@ async function main() {
       maskHalf: parseNumber(args, 'mask_half', 'maskHalf', 16),
       writeHalf: parseNumber(args, 'write_half', 'writeHalf', 20),
       harmonizeHalf: parseNumber(args, 'harmonize_half', 'harmonizeHalf', 12),
+      intersectionPass: parseNumber(args, 'intersection_pass', 'intersectionPass', 1),
+      intersectionMaskHalf: parseNumber(args, 'intersection_mask_half', 'intersectionMaskHalf', 10),
+      intersectionWriteHalf: parseNumber(args, 'intersection_write_half', 'intersectionWriteHalf', 24),
+      maxIntersections: parseNumber(args, 'max_intersections', 'maxIntersections', 0),
       maxSeams: parseNumber(args, 'max_seams', 'maxSeams', 0),
+      seamMosaicMode: parseString(args, 'seam_mosaic_mode', 'seamMosaicMode', 'blend'),
+      seamMosaicFeather: parseNumber(args, 'seam_mosaic_feather', 'seamMosaicFeather', 24),
       maxImages: parseNumber(args, 'max_images', 'maxImages', 0),
     });
     console.log(JSON.stringify(result));
