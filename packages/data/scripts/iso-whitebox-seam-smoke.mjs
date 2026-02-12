@@ -29,7 +29,7 @@ Important options:
   --z_min=0 --z_max=0 --tile_size=1024 --ppm=0.09 --height_scale=2.1 --overlap=0.10
   --bbox_scale=0.12 --min_area_m2=30 --outline_opacity=0.06
   --lora=<hf_id_or_path> --lora_scale=0.8 --strength=0.30 --steps=12 --guidance=4.5 --seed=0 --device=auto
-  --seam_context=0 --mask_half=16 --write_half=20 --max_seams=0
+  --seam_strength=0.14 --seam_context=0 --mask_half=16 --write_half=20 --harmonize_half=12 --max_seams=0
   --max_images=0
 `);
 }
@@ -54,6 +54,7 @@ export async function runIsoWhiteboxSeamSmoke({
   prompt = '',
   negative = '',
   strength = 0.3,
+  seamStrength = 0.14,
   steps = 12,
   guidance = 4.5,
   seed = 0,
@@ -70,6 +71,7 @@ export async function runIsoWhiteboxSeamSmoke({
   seamContext = 0,
   maskHalf = 16,
   writeHalf = 20,
+  harmonizeHalf = 12,
   maxSeams = 0,
   maxImages = 0,
 }) {
@@ -167,12 +169,13 @@ export async function runIsoWhiteboxSeamSmoke({
     loraScale,
     prompt,
     negative,
-    strength: 0.2,
+    strength: seamStrength,
     steps: Math.max(8, steps),
     guidance,
     seamContext,
     maskHalf,
     writeHalf,
+    harmonizeHalf,
     maxSeams,
     seed,
     device,
@@ -276,6 +279,7 @@ async function main() {
       prompt: parseString(args, 'prompt', 'p', ''),
       negative: parseString(args, 'negative', 'n', ''),
       strength: parseNumber(args, 'strength', 's', 0.3),
+      seamStrength: parseNumber(args, 'seam_strength', 'seamStrength', 0.14),
       steps: parseNumber(args, 'steps', 'steps', 12),
       guidance: parseNumber(args, 'guidance', 'cfg', 4.5),
       seed: parseNumber(args, 'seed', 'seed', 0),
@@ -292,6 +296,7 @@ async function main() {
       seamContext: parseNumber(args, 'seam_context', 'seamContext', 0),
       maskHalf: parseNumber(args, 'mask_half', 'maskHalf', 16),
       writeHalf: parseNumber(args, 'write_half', 'writeHalf', 20),
+      harmonizeHalf: parseNumber(args, 'harmonize_half', 'harmonizeHalf', 12),
       maxSeams: parseNumber(args, 'max_seams', 'maxSeams', 0),
       maxImages: parseNumber(args, 'max_images', 'maxImages', 0),
     });
