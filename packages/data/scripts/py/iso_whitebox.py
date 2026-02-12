@@ -14,10 +14,15 @@ from shapely.strtree import STRtree
 
 
 BG = (246, 242, 232, 255)  # #f6f2e8
-WALL_A = (209, 213, 219, 255)  # #d1d5db
-WALL_B = (156, 163, 175, 255)  # #9ca3af
-ROOF = (229, 231, 235, 255)  # #e5e7eb
-OUTLINE = (17, 24, 39, 255)  # #111827
+WALL_A = (214, 219, 226, 255)  # light wall
+WALL_B = (180, 188, 200, 255)  # shadow wall
+ROOF = (236, 238, 242, 255)  # roof
+OUTLINE_RGB = (44, 53, 68)  # #2c3544
+
+
+def _with_alpha(rgb, alpha_01):
+    a = int(max(0.0, min(1.0, float(alpha_01))) * 255.0)
+    return (int(rgb[0]), int(rgb[1]), int(rgb[2]), a)
 
 
 def _parse_bbox(raw):
@@ -65,7 +70,7 @@ def _iter_polygons(geom):
                 yield g
 
 
-def _draw_building(draw, poly, height_m, *, u0, v0, s_xy, s_z):
+def _draw_building(draw, poly, height_m, *, u0, v0, s_xy, s_z, outline_opacity):
     coords = list(poly.exterior.coords)
     if len(coords) < 4:
         return
@@ -108,7 +113,8 @@ def _draw_building(draw, poly, height_m, *, u0, v0, s_xy, s_z):
         wall = [base[i], base[j], roof[j], roof[i]]
         draw.polygon(wall, fill=color)
 
-    draw.polygon(roof, fill=ROOF, outline=OUTLINE)
+    outline = _with_alpha(OUTLINE_RGB, outline_opacity)
+    draw.polygon(roof, fill=ROOF, outline=outline)
 
 
 def main():
@@ -126,6 +132,18 @@ def main():
         default=1.6,
         help="Height scale factor (pixels-per-meter multiplier for z) (default: 1.6)",
     )
+    ap.add_argument(
+        "--min_area_m2",
+        type=float,
+        default=16.0,
+        help="Skip building geometries smaller than this area in m^2 (default: 16)",
+    )
+    ap.add_argument(
+        "--outline_opacity",
+        type=float,
+        default=0.18,
+        help="Roof outline opacity in [0..1] (default: 0.18)",
+    )
     ap.add_argument("--skip_empty", action="store_true", help="Skip writing empty tiles (default: false)")
     ap.add_argument("--max_tiles", type=int, default=0, help="Optional cap on total tiles written (0 = unlimited)")
     ap.add_argument("--report_json", default="", help="Optional JSON report output path")
@@ -139,6 +157,10 @@ def main():
         raise SystemExit("Invalid --ppm")
     if not (args.height_scale > 0 and math.isfinite(args.height_scale)):
         raise SystemExit("Invalid --height_scale")
+    if not (args.min_area_m2 >= 0 and math.isfinite(args.min_area_m2)):
+        raise SystemExit("Invalid --min_area_m2")
+    if not (0.0 <= args.outline_opacity <= 1.0 and math.isfinite(args.outline_opacity)):
+        raise SystemExit("Invalid --outline_opacity")
 
     bbox = _parse_bbox(args.bbox)
     min_lon, min_lat, max_lon, max_lat = bbox
@@ -162,6 +184,7 @@ def main():
 
     geoms = []
     out_heights = []
+    dropped_small = 0
 
     max_h = 0.0
     for i in range(n):
@@ -181,6 +204,9 @@ def main():
 
         geom_local = shp_transform(_xy, geom)
         if geom_local.is_empty:
+            continue
+        if float(getattr(geom_local, "area", 0.0)) < float(args.min_area_m2):
+            dropped_small += 1
             continue
         geoms.append(geom_local)
         out_heights.append(h_m)
@@ -261,7 +287,16 @@ def main():
                     geom = geoms[idx]
                     h_m = out_heights[idx]
                     for poly in _iter_polygons(geom):
-                        _draw_building(draw, poly, h_m, u0=tile_u0, v0=tile_v0, s_xy=s_xy, s_z=s_z)
+                        _draw_building(
+                            draw,
+                            poly,
+                            h_m,
+                            u0=tile_u0,
+                            v0=tile_v0,
+                            s_xy=s_xy,
+                            s_z=s_z,
+                            outline_opacity=float(args.outline_opacity),
+                        )
 
                 out_dir = os.path.join(out_root, str(z), str(tx))
                 _ensure_dir(out_dir)
@@ -307,6 +342,9 @@ def main():
         "z_min": int(args.z_min),
         "z_max": int(args.z_max),
         "tile_size": int(args.tile_size),
+        "min_area_m2": float(args.min_area_m2),
+        "outline_opacity": float(args.outline_opacity),
+        "dropped_small": int(dropped_small),
         "skip_empty": bool(args.skip_empty),
     }
 

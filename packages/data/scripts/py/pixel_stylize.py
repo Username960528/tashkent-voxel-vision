@@ -28,6 +28,8 @@ def _stylize(
     edge_threshold,
     edge_alpha,
     edge_thickness,
+    max_edge_coverage,
+    edge_dark_min_luma,
     contrast,
     saturation,
 ):
@@ -67,21 +69,48 @@ def _stylize(
     edges = img.convert("L").filter(ImageFilter.FIND_EDGES)
     edges_small = edges.resize((pw, ph), resample=Image.Resampling.BILINEAR)
     edges_arr = np.array(edges_small, dtype=np.uint8)
-    mask_small = (edges_arr >= int(edge_threshold)).astype(np.uint8) * 255
-    mask = Image.fromarray(mask_small, mode="L")
+    threshold_used = int(edge_threshold)
 
-    if int(edge_thickness) > 1:
-        # Pillow MaxFilter size is the full window size.
-        sz = int(edge_thickness)
-        if sz % 2 == 0:
-            sz += 1
-        mask = mask.filter(ImageFilter.MaxFilter(size=sz))
+    def _build_mask(threshold):
+        m_small = (edges_arr >= int(threshold)).astype(np.uint8) * 255
+        m = Image.fromarray(m_small, mode="L")
+        if int(edge_thickness) > 1:
+            # Pillow MaxFilter size is the full window size.
+            sz = int(edge_thickness)
+            if sz % 2 == 0:
+                sz += 1
+            m = m.filter(ImageFilter.MaxFilter(size=sz))
+        cov = float((np.array(m, dtype=np.uint8) > 0).mean())
+        return m, cov
+
+    mask, coverage = _build_mask(threshold_used)
+    # Guardrail: on high-frequency satellite textures, low thresholds can mark almost everything as "edge"
+    # and flood-fill the image with ink color. Raise threshold until edge coverage is bounded.
+    if 0.0 < float(max_edge_coverage) < 1.0 and coverage > float(max_edge_coverage):
+        while threshold_used < 250 and coverage > float(max_edge_coverage):
+            threshold_used = min(250, threshold_used + 8)
+            mask, coverage = _build_mask(threshold_used)
 
     mask = mask.resize((w, h), resample=Image.Resampling.NEAREST)
 
+    mask_arr = np.array(mask, dtype=np.uint8)
+    # Additional guardrail: draw outlines only on darker pixels, so we don't pepper bright areas
+    # with isolated dark squares when source tiles are highly textured/noisy.
+    if 0 <= int(edge_dark_min_luma) <= 255:
+        lum_small = np.array(small_rgb.convert("L"), dtype=np.uint8)
+        dark_small = (lum_small <= int(edge_dark_min_luma)).astype(np.uint8) * 255
+        dark = Image.fromarray(dark_small, mode="L").resize((w, h), resample=Image.Resampling.NEAREST)
+        dark_arr = np.array(dark, dtype=np.uint8)
+        mask_arr = np.where((mask_arr > 0) & (dark_arr > 0), 255, 0).astype(np.uint8)
+
+    mask = Image.fromarray(mask_arr, mode="L")
     ink = Image.new("RGBA", (w, h), (INK[0], INK[1], INK[2], int(round(255.0 * _clamp01(edge_alpha)))))
     out = Image.composite(ink, up, mask)
-    return out
+    return out, {
+        "edge_threshold_used": int(threshold_used),
+        "edge_coverage_lowres": float(coverage),
+        "edge_coverage_final": float((mask_arr > 0).mean()),
+    }
 
 
 def main():
@@ -97,6 +126,18 @@ def main():
     ap.add_argument("--edge_threshold", type=int, default=48, help="Edge threshold 0..255 (default: 48)")
     ap.add_argument("--edge_alpha", type=float, default=0.85, help="Edge alpha 0..1 (default: 0.85)")
     ap.add_argument("--edge_thickness", type=int, default=2, help="Edge thickness in pixels at low-res (default: 2)")
+    ap.add_argument(
+        "--max_edge_coverage",
+        type=float,
+        default=0.22,
+        help="Adaptive guardrail: max low-res edge coverage before threshold auto-raise (default: 0.22)",
+    )
+    ap.add_argument(
+        "--edge_dark_min_luma",
+        type=int,
+        default=100,
+        help="Only draw edges where quantized luminance <= this value (0..255, default: 100)",
+    )
 
     ap.add_argument("--contrast", type=float, default=1.10, help="Pre-quantize contrast boost (default: 1.10)")
     ap.add_argument("--saturation", type=float, default=1.05, help="Pre-quantize saturation boost (default: 1.05)")
@@ -112,6 +153,10 @@ def main():
         raise SystemExit("--pixel_scale must be in [0.01, 1.0]")
     if args.edge_thickness < 1:
         raise SystemExit("--edge_thickness must be >= 1")
+    if not (math.isfinite(args.max_edge_coverage) and 0.0 <= args.max_edge_coverage <= 1.0):
+        raise SystemExit("--max_edge_coverage must be in [0, 1]")
+    if args.edge_dark_min_luma < 0 or args.edge_dark_min_luma > 255:
+        raise SystemExit("--edge_dark_min_luma must be in [0, 255]")
     if not math.isfinite(args.contrast) or args.contrast <= 0:
         raise SystemExit("--contrast must be > 0")
     if not math.isfinite(args.saturation) or args.saturation <= 0:
@@ -125,7 +170,7 @@ def main():
     _ensure_dir(os.path.dirname(os.path.abspath(out_path)))
     img = Image.open(in_path)
 
-    out = _stylize(
+    out, edge_debug = _stylize(
         img,
         pixel_scale=args.pixel_scale,
         palette_size=args.palette,
@@ -133,6 +178,8 @@ def main():
         edge_threshold=args.edge_threshold,
         edge_alpha=args.edge_alpha,
         edge_thickness=args.edge_thickness,
+        max_edge_coverage=args.max_edge_coverage,
+        edge_dark_min_luma=args.edge_dark_min_luma,
         contrast=args.contrast,
         saturation=args.saturation,
     )
@@ -146,8 +193,13 @@ def main():
         "palette": int(args.palette),
         "dither": bool(args.dither),
         "edge_threshold": int(args.edge_threshold),
+        "edge_threshold_used": int(edge_debug["edge_threshold_used"]),
+        "edge_coverage_lowres": float(edge_debug["edge_coverage_lowres"]),
+        "edge_coverage_final": float(edge_debug["edge_coverage_final"]),
         "edge_alpha": float(args.edge_alpha),
         "edge_thickness": int(args.edge_thickness),
+        "max_edge_coverage": float(args.max_edge_coverage),
+        "edge_dark_min_luma": int(args.edge_dark_min_luma),
         "contrast": float(args.contrast),
         "saturation": float(args.saturation),
     }
@@ -166,4 +218,3 @@ if __name__ == "__main__":
         main()
     except BrokenPipeError:
         sys.exit(1)
-

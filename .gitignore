@@ -19,6 +19,7 @@ data/releases/
 
 # Python (packages/data venv + caches)
 packages/data/.venv/
+packages/data/.venv-diffusion/
 packages/data/scripts/py/__pycache__/
 
 # Misc
