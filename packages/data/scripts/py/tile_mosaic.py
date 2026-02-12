@@ -44,7 +44,9 @@ def _resolve_index_sets(x_auto, y_auto, grid_arg):
     if grid_arg and grid_arg > 0:
         v = list(range(int(grid_arg)))
         return v, v
-    return x_auto, y_auto
+    x_min, x_max = min(x_auto), max(x_auto)
+    y_min, y_max = min(y_auto), max(y_auto)
+    return list(range(int(x_min), int(x_max) + 1)), list(range(int(y_min), int(y_max) + 1))
 
 
 def _crop_margin_px(size_px, overlap):
@@ -195,6 +197,8 @@ def main():
 
     x_auto, y_auto = _find_index_sets(args.in_dir)
     x_vals, y_vals = _resolve_index_sets(x_auto, y_auto, int(args.grid))
+    x_found = sorted(set(x_auto))
+    y_found = sorted(set(y_auto))
 
     first = None
     for y in y_vals:
@@ -254,16 +258,26 @@ def main():
     canvas.save(args.out_png, "PNG")
 
     grid_side = max(len(x_vals), len(y_vals))
+    expected_tiles = int(len(x_vals) * len(y_vals))
+    found_tiles = int(max(0, expected_tiles - missing))
     report = {
         "in_dir": os.path.abspath(args.in_dir),
         "out_png": os.path.abspath(args.out_png),
         "grid": int(grid_side),
         "grid_xy": {"x": int(len(x_vals)), "y": int(len(y_vals))},
+        "tile_count_expected": expected_tiles,
+        "tile_count_found": found_tiles,
         "index_ranges": {
             "x_min": int(min(x_vals)),
             "x_max": int(max(x_vals)),
             "y_min": int(min(y_vals)),
             "y_max": int(max(y_vals)),
+        },
+        "detected_index_ranges": {
+            "x_min": int(min(x_found)),
+            "x_max": int(max(x_found)),
+            "y_min": int(min(y_found)),
+            "y_max": int(max(y_found)),
         },
         "overlap": float(args.overlap),
         "mode": args.mode,

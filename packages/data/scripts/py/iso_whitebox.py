@@ -133,6 +133,12 @@ def main():
         help="Height scale factor (pixels-per-meter multiplier for z) (default: 1.6)",
     )
     ap.add_argument(
+        "--overlap",
+        type=float,
+        default=0.10,
+        help="Fractional per-side overlap for neighboring tiles (default: 0.10)",
+    )
+    ap.add_argument(
         "--min_area_m2",
         type=float,
         default=16.0,
@@ -157,6 +163,8 @@ def main():
         raise SystemExit("Invalid --ppm")
     if not (args.height_scale > 0 and math.isfinite(args.height_scale)):
         raise SystemExit("Invalid --height_scale")
+    if not (math.isfinite(args.overlap) and 0.0 <= args.overlap < 0.49):
+        raise SystemExit("Invalid --overlap (expected 0..0.49)")
     if not (args.min_area_m2 >= 0 and math.isfinite(args.min_area_m2)):
         raise SystemExit("Invalid --min_area_m2")
     if not (0.0 <= args.outline_opacity <= 1.0 and math.isfinite(args.outline_opacity)):
@@ -242,16 +250,24 @@ def main():
 
         extent_u = (u_max - u_min) * scale
         extent_v = (v_max - v_min) * scale
-        tiles_x = int(math.ceil(extent_u / float(args.tile_size)))
-        tiles_y = int(math.ceil(extent_v / float(args.tile_size)))
+        overlap = float(args.overlap)
+        core_step_px = float(args.tile_size) / (1.0 + 2.0 * overlap)
+        overlap_margin_px = core_step_px * overlap
+        if not (core_step_px > 0 and math.isfinite(core_step_px)):
+            raise SystemExit("invalid derived core step for overlap")
+
+        tiles_x = int(math.ceil(extent_u / core_step_px))
+        tiles_y = int(math.ceil(extent_v / core_step_px))
 
         for ty in range(tiles_y):
             for tx in range(tiles_x):
                 if args.max_tiles and written >= args.max_tiles:
                     break
 
-                tile_u0 = u_min * scale + tx * args.tile_size
-                tile_v0 = v_min * scale + ty * args.tile_size
+                tile_core_u0 = u_min * scale + tx * core_step_px
+                tile_core_v0 = v_min * scale + ty * core_step_px
+                tile_u0 = tile_core_u0 - overlap_margin_px
+                tile_v0 = tile_core_v0 - overlap_margin_px
 
                 # Expanded query rect (in screen space) -> world polygon (ground plane).
                 qpad = float(args.tile_size) * 0.35
@@ -319,6 +335,7 @@ def main():
         "minzoom": int(args.z_min),
         "maxzoom": int(args.z_max),
         "tiles": ["{z}/{x}/{y}.png"],
+        "overlap": float(args.overlap),
         "bounds_wgs84": [min_lon, min_lat, max_lon, max_lat],
         "render": {
             "projection": "isometric_affine",
@@ -342,6 +359,7 @@ def main():
         "z_min": int(args.z_min),
         "z_max": int(args.z_max),
         "tile_size": int(args.tile_size),
+        "overlap": float(args.overlap),
         "min_area_m2": float(args.min_area_m2),
         "outline_opacity": float(args.outline_opacity),
         "dropped_small": int(dropped_small),
