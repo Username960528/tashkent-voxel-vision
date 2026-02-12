@@ -1,4 +1,5 @@
 # Autofix E2E Control
 
-status=BROKEN
+status=FIXED
 note=replace status to FIXED via autofix command
+autofix_e2e=pass
