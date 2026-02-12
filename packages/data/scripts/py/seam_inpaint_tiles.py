@@ -145,6 +145,86 @@ def _run_inpaint(
     return out.convert("RGB")
 
 
+def _ramp_values(length, start, end):
+    if length <= 0:
+        return []
+    if length == 1:
+        return [int(round(end))]
+    vals = []
+    for i in range(length):
+        t = float(i) / float(length - 1)
+        vals.append(int(round(float(start) + (float(end) - float(start)) * t)))
+    return vals
+
+
+def _blend_paste_x(tile_img, strip, x, y, alpha_start, alpha_end):
+    sw, sh = strip.size
+    if sw <= 0 or sh <= 0:
+        return
+    base = tile_img.crop((x, y, x + sw, y + sh))
+    if sw == 1:
+        tile_img.paste(strip, (x, y))
+        return
+    row = Image.new("L", (sw, 1))
+    row.putdata(_ramp_values(sw, alpha_start, alpha_end))
+    mask = row.resize((sw, sh), resample=Image.Resampling.NEAREST)
+    blended = Image.composite(strip, base, mask)
+    tile_img.paste(blended, (x, y))
+
+
+def _blend_paste_y(tile_img, strip, x, y, alpha_start, alpha_end):
+    sw, sh = strip.size
+    if sw <= 0 or sh <= 0:
+        return
+    base = tile_img.crop((x, y, x + sw, y + sh))
+    if sh == 1:
+        tile_img.paste(strip, (x, y))
+        return
+    col = Image.new("L", (1, sh))
+    col.putdata(_ramp_values(sh, alpha_start, alpha_end))
+    mask = col.resize((sw, sh), resample=Image.Resampling.NEAREST)
+    blended = Image.composite(strip, base, mask)
+    tile_img.paste(blended, (x, y))
+
+
+def _harmonize_vertical_columns(left, right, seam_left_x, seam_right_x, top, bottom, half):
+    if half <= 0 or bottom <= top:
+        return
+    for d in range(int(half)):
+        lx = int(seam_left_x - d)
+        rx = int(seam_right_x + d)
+        if lx < 0 or rx < 0:
+            break
+        lcol = left.crop((lx, top, lx + 1, bottom))
+        rcol = right.crop((rx, top, rx + 1, bottom))
+        avg = Image.blend(lcol, rcol, 0.5)
+        if int(half) <= 1:
+            t = 1.0
+        else:
+            t = 1.0 - float(d) / float(int(half) - 1)
+        left.paste(Image.blend(lcol, avg, t), (lx, top))
+        right.paste(Image.blend(rcol, avg, t), (rx, top))
+
+
+def _harmonize_horizontal_rows(top_img, bottom_img, seam_top_y, seam_bottom_y, left, right, half):
+    if half <= 0 or right <= left:
+        return
+    for d in range(int(half)):
+        ty = int(seam_top_y - d)
+        by = int(seam_bottom_y + d)
+        if ty < 0 or by < 0:
+            break
+        trow = top_img.crop((left, ty, right, ty + 1))
+        brow = bottom_img.crop((left, by, right, by + 1))
+        avg = Image.blend(trow, brow, 0.5)
+        if int(half) <= 1:
+            t = 1.0
+        else:
+            t = 1.0 - float(d) / float(int(half) - 1)
+        top_img.paste(Image.blend(trow, avg, t), (left, ty))
+        bottom_img.paste(Image.blend(brow, avg, t), (left, by))
+
+
 def _process_vertical(
     *,
     layer_dir,
@@ -158,6 +238,7 @@ def _process_vertical(
     seam_context,
     mask_half,
     write_half,
+    harmonize_half,
     run_inpaint,
 ):
     left_path = _tile_path(layer_dir, x_left, y)
@@ -207,8 +288,34 @@ def _process_vertical(
     left_strip = out.crop((split - whalf, 0, split, patch_h))
     right_strip = out.crop((split, 0, split + whalf, patch_h))
 
-    left.paste(left_strip, (w - mx - whalf, top))
-    right.paste(right_strip, (mx, top))
+    # Feather write-back from old tile content to inpainted seam strip to avoid
+    # visible "write band" edges at strip boundaries.
+    _blend_paste_x(
+        tile_img=left,
+        strip=left_strip,
+        x=w - mx - whalf,
+        y=top,
+        alpha_start=0,
+        alpha_end=255,
+    )
+    _blend_paste_x(
+        tile_img=right,
+        strip=right_strip,
+        x=mx,
+        y=top,
+        alpha_start=255,
+        alpha_end=0,
+    )
+    hhalf = max(0, min(int(harmonize_half), int(whalf)))
+    _harmonize_vertical_columns(
+        left=left,
+        right=right,
+        seam_left_x=int(w - mx - 1),
+        seam_right_x=int(mx),
+        top=int(top),
+        bottom=int(bottom),
+        half=hhalf,
+    )
     left.save(left_path, "PNG")
     right.save(right_path, "PNG")
     return True, "ok"
@@ -227,6 +334,7 @@ def _process_horizontal(
     seam_context,
     mask_half,
     write_half,
+    harmonize_half,
     run_inpaint,
 ):
     top_path = _tile_path(layer_dir, x, y_top)
@@ -276,8 +384,32 @@ def _process_horizontal(
     top_strip = out.crop((0, split - whalf, patch_w, split))
     bottom_strip = out.crop((0, split, patch_w, split + whalf))
 
-    top_img.paste(top_strip, (left, h - my - whalf))
-    bottom_img.paste(bottom_strip, (left, my))
+    _blend_paste_y(
+        tile_img=top_img,
+        strip=top_strip,
+        x=left,
+        y=h - my - whalf,
+        alpha_start=0,
+        alpha_end=255,
+    )
+    _blend_paste_y(
+        tile_img=bottom_img,
+        strip=bottom_strip,
+        x=left,
+        y=my,
+        alpha_start=255,
+        alpha_end=0,
+    )
+    hhalf = max(0, min(int(harmonize_half), int(whalf)))
+    _harmonize_horizontal_rows(
+        top_img=top_img,
+        bottom_img=bottom_img,
+        seam_top_y=int(h - my - 1),
+        seam_bottom_y=int(my),
+        left=int(left),
+        right=int(right),
+        half=hhalf,
+    )
     top_img.save(top_path, "PNG")
     bottom_img.save(bottom_path, "PNG")
     return True, "ok"
@@ -300,6 +432,12 @@ def main():
     ap.add_argument("--seam_context", type=int, default=0, help="Context px on each side around seam (0=auto)")
     ap.add_argument("--mask_half", type=int, default=16, help="Inpaint mask half-width in px")
     ap.add_argument("--write_half", type=int, default=20, help="Writeback half-width into each tile in px")
+    ap.add_argument(
+        "--harmonize_half",
+        type=int,
+        default=12,
+        help="Symmetric cross-tile blend half-width after writeback (default: 12, 0=disable)",
+    )
     ap.add_argument("--max_seams", type=int, default=0, help="Optional seam cap (0=all)")
     ap.add_argument("--seed", type=int, default=0, help="Seed base; -1=random")
     ap.add_argument("--device", default="auto", help="auto|cuda|mps|cpu")
@@ -319,6 +457,8 @@ def main():
         raise SystemExit("--write_half must be > 0")
     if args.seam_context < 0:
         raise SystemExit("--seam_context must be >= 0")
+    if args.harmonize_half < 0:
+        raise SystemExit("--harmonize_half must be >= 0")
     if args.max_seams < 0:
         raise SystemExit("--max_seams must be >= 0")
 
@@ -521,6 +661,7 @@ def main():
                 seam_context=seam_context,
                 mask_half=int(args.mask_half),
                 write_half=int(args.write_half),
+                harmonize_half=int(args.harmonize_half),
                 run_inpaint=lambda patch, mask, idx=seam_idx: run_inpaint(patch, mask, idx),
             )
             seam_idx += 1
@@ -556,6 +697,7 @@ def main():
                     seam_context=seam_context,
                     mask_half=int(args.mask_half),
                     write_half=int(args.write_half),
+                    harmonize_half=int(args.harmonize_half),
                     run_inpaint=lambda patch, mask, idx=seam_idx: run_inpaint(patch, mask, idx),
                 )
                 seam_idx += 1
@@ -599,6 +741,7 @@ def main():
         "seam_context": int(seam_context),
         "mask_half": int(args.mask_half),
         "write_half": int(args.write_half),
+        "harmonize_half": int(args.harmonize_half),
         "vertical_pairs": int(len(vertical_pairs)),
         "horizontal_pairs": int(len(horizontal_pairs)),
         "x_index_gaps": x_gaps,

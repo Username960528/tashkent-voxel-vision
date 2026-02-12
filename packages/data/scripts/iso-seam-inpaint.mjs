@@ -28,6 +28,7 @@ Options:
   --seam_context   Pixels of context per side around seam (default: 0=auto from overlap)
   --mask_half      Half-width of inpaint mask band around seam in px (default: 16)
   --write_half     Half-width written back into each neighbor tile in px (default: 20)
+  --harmonize_half Symmetric cross-tile blend half-width after writeback (default: 12, 0=disable)
   --max_seams      Optional cap on processed seams (default: 0=all)
   --seed           Seed base (default: 0; -1=random base)
   --device         auto|cuda|mps|cpu (default: auto)
@@ -88,6 +89,7 @@ export async function seamInpaintTiles({
   seamContext = 0,
   maskHalf = 16,
   writeHalf = 20,
+  harmonizeHalf = 12,
   maxSeams = 0,
   seed = 0,
   device = 'auto',
@@ -157,6 +159,8 @@ export async function seamInpaintTiles({
       String(maskHalf),
       '--write_half',
       String(writeHalf),
+      '--harmonize_half',
+      String(harmonizeHalf),
       '--max_seams',
       String(maxSeams),
       '--seed',
@@ -225,6 +229,7 @@ async function main() {
       seamContext: readNumber(args, 'seam_context', 'seamContext', 0),
       maskHalf: readNumber(args, 'mask_half', 'maskHalf', 16),
       writeHalf: readNumber(args, 'write_half', 'writeHalf', 20),
+      harmonizeHalf: readNumber(args, 'harmonize_half', 'harmonizeHalf', 12),
       maxSeams: readNumber(args, 'max_seams', 'maxSeams', 0),
       seed: readNumber(args, 'seed', 'seed', 0),
       device: typeof args.device === 'string' ? args.device : 'auto',
