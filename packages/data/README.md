@@ -66,6 +66,32 @@ pnpm data:iso:stylize:pixel:dir \
   --out_dir=exports/iso_gmp_tiles/grid_3/pixel \
   --pixel_scale=0.22 --palette=64 --dither --edge_threshold=112 --edge_alpha=0.28 --edge_thickness=1
 
+# Batch image generation via Gemini/Vertex (ported from tg_bot_geek image generation flow)
+# 1) Put prompts into a run-relative txt file (one prompt per line)
+# 2) Generate many images into exports/gemini_images/
+pnpm data:image:batch \
+  --run_id=tashkent_2026-02-07 \
+  --prompts_file=exports/prompts/batch.txt \
+  --out_dir=exports/gemini_images \
+  --model=gemini-3-pro-image-preview \
+  --fallback_model=gemini-2.5-flash-image \
+  --image_size=2K \
+  --aspect_ratio=1:1 \
+  --temperature=0.45 \
+  --top_p=0.9 \
+  --candidate_count=3 \
+  --concurrency=3
+
+# Vertex mode (optional):
+# - Set IMAGE_BACKEND=vertex
+# - Set VERTEX_PROJECT and VERTEX_LOCATION
+# - Provide VERTEX_ACCESS_TOKEN or run gcloud auth locally
+# - For NanoBananoPro pass its model id/resource via --model=...
+# - Optional thinking controls: --thinking_budget, --thinking_level, --include_thoughts
+# - For gemini-3-pro-image-preview, use VERTEX_LOCATION=global
+# - For IMAGE responses, --candidate_count>1 is emulated via repeated calls (variant seeds)
+# - If gemini-3-pro-image-preview returns 429 (Resource exhausted), keep fallback_model enabled
+
 # Stitch a quick mosaic for visual QA (optional)
 pnpm data:iso:mosaic --run_id=tashkent_2026-02-07 --tiles_dir=exports/iso_gmp_tiles/grid_3 --layer=pixel
 
