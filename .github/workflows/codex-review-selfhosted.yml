@@ -1,0 +1,498 @@
+name: codex-review-selfhosted
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+      repo:
+        description: "owner/repo (defaults to current)"
+        required: false
+      runner_label:
+        description: "Optional self-hosted runner label (appended to [self-hosted,codex])"
+        required: false
+      login_method:
+        description: "Codex auth method override: chatgpt|api|auto (default: vars.CODEX_AUTOFIX_LOGIN_METHOD or auto)"
+        required: false
+      model:
+        description: "Optional Codex model override (default: vars.CODEX_REVIEW_MODEL or gpt-5.3-codex)"
+        required: false
+      reasoning_effort:
+        description: "Optional reasoning effort override (default: vars.CODEX_REVIEW_REASONING_EFFORT or xhigh)"
+        required: false
+      trigger_comment_id:
+        description: "Issue comment id that reported Codex usage limits"
+        required: false
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: codex-selfhosted-review-${{ inputs.repo || github.repository }}-pr-${{ inputs.pr_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
+    runs-on: ${{ fromJSON(inputs.runner_label && format('["self-hosted","codex","{0}"]', inputs.runner_label) || '["self-hosted","codex"]') }}
+    steps:
+      - name: Resolve PR context
+        id: pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER_INPUT: ${{ inputs.pr_number }}
+          REPO_INPUT: ${{ inputs.repo }}
+          MODEL_INPUT: ${{ inputs.model }}
+          DEFAULT_MODEL: ${{ vars.CODEX_REVIEW_MODEL }}
+          FALLBACK_MODEL: ${{ vars.CODEX_AUTOFIX_MODEL }}
+          REASONING_EFFORT_INPUT: ${{ inputs.reasoning_effort }}
+          DEFAULT_REASONING_EFFORT: ${{ vars.CODEX_REVIEW_REASONING_EFFORT }}
+          LOGIN_METHOD_INPUT: ${{ inputs.login_method }}
+          DEFAULT_LOGIN_METHOD: ${{ vars.CODEX_AUTOFIX_LOGIN_METHOD }}
+          TRIGGER_COMMENT_ID_INPUT: ${{ inputs.trigger_comment_id }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          repo_input = (os.environ.get("REPO_INPUT") or "").strip()
+          repo_full = repo_input or os.environ.get("GITHUB_REPOSITORY", "").strip()
+          if "/" not in repo_full:
+              raise SystemExit("repo must be owner/repo")
+          owner, repo = repo_full.split("/", 1)
+
+          pr_number_raw = (os.environ.get("PR_NUMBER_INPUT") or "").strip()
+          if not pr_number_raw.isdigit():
+              raise SystemExit("pr_number must be numeric")
+          pr_number = int(pr_number_raw)
+
+          token = os.environ["GITHUB_TOKEN"]
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "codex-review-selfhosted",
+          }
+
+          def get_json(url):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  return json.load(resp)
+
+          pr = get_json(f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}")
+          if (pr.get("state") or "").lower() != "open":
+              raise SystemExit(f"PR #{pr_number} is not open")
+
+          trigger_comment_id = (os.environ.get("TRIGGER_COMMENT_ID_INPUT") or "").strip()
+          trigger_comment_url = ""
+          if trigger_comment_id:
+              try:
+                  trigger = get_json(
+                      f"https://api.github.com/repos/{owner}/{repo}/issues/comments/{trigger_comment_id}"
+                  )
+                  trigger_comment_url = str(trigger.get("html_url") or "")
+              except Exception:
+                  trigger_comment_url = ""
+
+          model = (os.environ.get("MODEL_INPUT") or "").strip()
+          if not model:
+              model = (
+                  (os.environ.get("DEFAULT_MODEL") or "").strip()
+                  or (os.environ.get("FALLBACK_MODEL") or "").strip()
+                  or "gpt-5.3-codex"
+              )
+          if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", model):
+              raise SystemExit("Invalid model (allowed: [A-Za-z0-9_.-]{1,128})")
+
+          reasoning_effort = (os.environ.get("REASONING_EFFORT_INPUT") or "").strip().lower()
+          if not reasoning_effort:
+              reasoning_effort = (
+                  (os.environ.get("DEFAULT_REASONING_EFFORT") or "").strip().lower()
+                  or "xhigh"
+              )
+          if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", reasoning_effort):
+              raise SystemExit("Invalid reasoning_effort (allowed: [A-Za-z0-9_-]{1,32})")
+
+          login_method = (os.environ.get("LOGIN_METHOD_INPUT") or "").strip().lower()
+          if not login_method:
+              login_method = (os.environ.get("DEFAULT_LOGIN_METHOD") or "").strip().lower() or "auto"
+
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as f:
+              f.write(f"owner={owner}\n")
+              f.write(f"repo_name={repo}\n")
+              f.write(f"repo_full={owner}/{repo}\n")
+              f.write(f"pr_number={pr_number}\n")
+              f.write(f"pr_url={pr.get('html_url','')}\n")
+              f.write(f"head_ref={pr.get('head',{}).get('ref','')}\n")
+              f.write(f"head_sha={pr.get('head',{}).get('sha','')}\n")
+              f.write(f"base_ref={pr.get('base',{}).get('ref','main')}\n")
+              f.write(f"model={model}\n")
+              f.write(f"reasoning_effort={reasoning_effort}\n")
+              f.write(f"login_method={login_method}\n")
+              f.write(f"trigger_comment_id={trigger_comment_id}\n")
+              f.write(f"trigger_comment_url={trigger_comment_url}\n")
+          PY
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.repo_full }}
+          ref: refs/heads/${{ steps.pr.outputs.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run self-hosted Codex review
+        id: review
+        env:
+          OPENAI_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_LOGIN_METHOD: ${{ steps.pr.outputs.login_method }}
+          CODEX_MODEL: ${{ steps.pr.outputs.model }}
+          CODEX_REASONING_EFFORT: ${{ steps.pr.outputs.reasoning_effort }}
+          REPO_FULL: ${{ steps.pr.outputs.repo_full }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          REPORT_FILE: ${{ runner.temp }}/codex_selfhosted_review.md
+          RAW_FILE: ${{ runner.temp }}/codex_selfhosted_review_raw.log
+        run: |
+          set -euo pipefail
+
+          git fetch origin "${BASE_REF}" --depth=1 || true
+
+          login_method="${CODEX_LOGIN_METHOD:-auto}"
+          if [ "${login_method}" = "chatgpt" ]; then
+            unset OPENAI_API_KEY CODEX_API_KEY
+          elif [ "${login_method}" = "auto" ]; then
+            if [ -z "${OPENAI_API_KEY:-}" ] || [ -z "${CODEX_API_KEY:-}" ]; then
+              unset OPENAI_API_KEY CODEX_API_KEY
+            fi
+          elif [ "${login_method}" = "api" ]; then
+            if [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${CODEX_API_KEY:-}" ]; then
+              echo "ERROR: login_method=api requires secrets.CODEX_API_KEY" >&2
+              exit 2
+            fi
+          fi
+
+          prompt="$(cat <<EOF
+          Review the pull request changes in this checked-out repo.
+
+          Context:
+          - Repo: ${REPO_FULL}
+          - PR: #${PR_NUMBER}
+          - Base: origin/${BASE_REF}
+          - Head SHA: ${HEAD_SHA}
+
+          Instructions:
+          1) Inspect changes with git diff --no-color origin/${BASE_REF}...HEAD and related code context.
+          2) Report only real, actionable defects (correctness/safety/race/regression).
+          3) Do not modify any repository files.
+          4) Write final review result to ${REPORT_FILE} (overwrite).
+          5) Output format in ${REPORT_FILE} must be exactly one of:
+             - NO_MAJOR_ISSUES
+             - Markdown bullet list where each bullet is one line:
+               - [P1|P2|P3] <path>:<line> <short title> — <impact and reason>
+          EOF
+          )"
+
+          codex exec -m "${CODEX_MODEL}" -c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"" \
+            --dangerously-bypass-approvals-and-sandbox --sandbox danger-full-access \
+            "${prompt}" | tee "${RAW_FILE}"
+
+          if [ ! -s "${REPORT_FILE}" ]; then
+            {
+              echo "REPORT_GENERATION_FAILED"
+              echo
+              echo "Codex did not write ${REPORT_FILE}."
+              echo "Raw output tail:"
+              tail -n 80 "${RAW_FILE}" || true
+            } > "${REPORT_FILE}"
+          fi
+
+          echo "report_file=${REPORT_FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Post fallback review result
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          OWNER: ${{ steps.pr.outputs.owner }}
+          REPO_NAME: ${{ steps.pr.outputs.repo_name }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          REPORT_FILE: ${{ steps.review.outputs.report_file || format('{0}/codex_selfhosted_review.md', runner.temp) }}
+          TRIGGER_COMMENT_ID: ${{ steps.pr.outputs.trigger_comment_id }}
+          TRIGGER_COMMENT_URL: ${{ steps.pr.outputs.trigger_comment_url }}
+          CODEX_MODEL: ${{ steps.pr.outputs.model }}
+          CODEX_REASONING_EFFORT: ${{ steps.pr.outputs.reasoning_effort }}
+          CODEX_LOGIN_METHOD: ${{ steps.pr.outputs.login_method }}
+          RUNNER_LABEL: ${{ inputs.runner_label }}
+          JOB_STATUS: ${{ job.status }}
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const owner = String(process.env.OWNER || '');
+            const repo = String(process.env.REPO_NAME || '');
+            const prNumber = Number(process.env.PR_NUMBER || 0);
+            const prUrl = String(process.env.PR_URL || '');
+            const headSha = String(process.env.HEAD_SHA || '').trim();
+            const reportPath = String(process.env.REPORT_FILE || '');
+            const triggerCommentId = String(process.env.TRIGGER_COMMENT_ID || '').trim();
+            const triggerCommentUrl = String(process.env.TRIGGER_COMMENT_URL || '').trim();
+            const model = String(process.env.CODEX_MODEL || '').trim();
+            const reasoningEffort = String(process.env.CODEX_REASONING_EFFORT || '').trim();
+            const loginMethod = String(process.env.CODEX_LOGIN_METHOD || '').trim();
+            const runnerLabel = String(process.env.RUNNER_LABEL || '').trim();
+            const jobStatus = String(process.env.JOB_STATUS || '').trim();
+
+            if (!owner || !repo || !prNumber || !headSha) {
+              core.info('Skip: missing PR context for posting fallback review.');
+              return;
+            }
+
+            const report = (() => {
+              try {
+                return fs.readFileSync(reportPath, 'utf8').trim();
+              } catch (_) {
+                return 'REPORT_GENERATION_FAILED\n\nReport file is missing.';
+              }
+            })();
+
+            const marker = `<!-- codex-selfhosted-review:sha=${headSha} source=quota-fallback -->`;
+            const triggerTag = triggerCommentId ? `trigger_comment_id=${triggerCommentId}` : '';
+
+            const issueComments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+            const alreadyPosted = issueComments.some(c => {
+              const body = String(c.body || '');
+              if (!body.includes(marker)) return false;
+              if (!triggerTag) return true;
+              return body.includes(triggerTag);
+            });
+            if (alreadyPosted) {
+              core.info(`Fallback review already posted for sha ${headSha}; skipping.`);
+              return;
+            }
+
+            const isClean = /^NO_MAJOR_ISSUES\b/i.test(report);
+            const failed = /^REPORT_GENERATION_FAILED\b/i.test(report) || jobStatus !== 'success';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const lines = [
+              marker,
+              failed
+                ? 'Self-hosted Codex review fallback failed.'
+                : isClean
+                  ? 'Self-hosted Codex review fallback: no major issues.'
+                  : 'Self-hosted Codex review fallback found issues.',
+              '',
+              `sha=${headSha.slice(0, 12)}`,
+              model ? `model=${model}` : '',
+              reasoningEffort ? `reasoning_effort=${reasoningEffort}` : '',
+              triggerTag,
+              triggerCommentUrl ? `trigger_comment=${triggerCommentUrl}` : '',
+              `pr=${prUrl}`,
+              `run=${runUrl}`,
+              '',
+              isClean && !failed ? 'NO_MAJOR_ISSUES' : report,
+            ].filter(Boolean);
+
+            const fallbackComment = await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body: lines.join('\n'),
+            });
+            const fallbackCommentId = fallbackComment?.data?.id ? String(fallbackComment.data.id) : '';
+            const fallbackCommentUrl = String(fallbackComment?.data?.html_url || '');
+
+            if (!isClean && !failed) {
+              const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              const labels = (pr.data.labels || []).map(l => l.name);
+              const prBody = String(pr.data.body || '');
+              const dryRunMarkerRe = /(?:^|\n)[ \t]*<!--[ \t]*codex-autofix:dry-run[ \t]*(?:=[ \t]*(?:true|1|yes|y))?[ \t]*-->[ \t]*(?:\n|$)/i;
+              const dryRun = dryRunMarkerRe.test(prBody);
+              const autofixResultRe = /<!--\s*codex-autofix:result sha=([0-9a-f]{7,40})\s+status=([a-z]+)\s*-->/i;
+              const autofixMarkerRe = /<!--\s*codex-autofix:sha=([0-9a-f]{7,40})\s*-->/i;
+              const toMs = (value) => {
+                const ms = Date.parse(String(value || ''));
+                return Number.isFinite(ms) ? ms : 0;
+              };
+              let latestAutofixResult = null; // { status, created_at }
+              let latestFallbackMarker = null; // { created_at }
+              for (let i = issueComments.length - 1; i >= 0; i--) {
+                const body = String(issueComments[i]?.body || '');
+                if (!latestAutofixResult) {
+                  const resultMatch = body.match(autofixResultRe);
+                  if (resultMatch && headSha.startsWith(String(resultMatch[1] || ''))) {
+                    latestAutofixResult = {
+                      status: String(resultMatch[2] || '').toLowerCase(),
+                      created_at: String(issueComments[i]?.created_at || ''),
+                    };
+                  }
+                }
+                if (!latestFallbackMarker) {
+                  const markerMatch = body.match(autofixMarkerRe);
+                  if (
+                    markerMatch &&
+                    headSha === String(markerMatch[1] || '') &&
+                    body.includes('source=quota-fallback-review')
+                  ) {
+                    latestFallbackMarker = {
+                      created_at: String(issueComments[i]?.created_at || ''),
+                    };
+                  }
+                }
+                if (latestAutofixResult && latestFallbackMarker) break;
+              }
+              const dispatchCooldownMs = 15 * 60 * 1000;
+              if (latestFallbackMarker) {
+                const markerAgeMs = Date.now() - toMs(latestFallbackMarker.created_at);
+                if (markerAgeMs < dispatchCooldownMs) {
+                  core.info(
+                    `Skip autofix dispatch from fallback review: recent fallback marker exists for sha ${headSha} (age_ms=${markerAgeMs}).`
+                  );
+                  return;
+                }
+              }
+              if (latestAutofixResult?.status === 'success') {
+                const resultAgeMs = Date.now() - toMs(latestAutofixResult.created_at);
+                if (resultAgeMs < dispatchCooldownMs) {
+                  core.info(
+                    `Skip autofix dispatch from fallback review: recent successful autofix already reported for sha ${headSha} (age_ms=${resultAgeMs}).`
+                  );
+                  return;
+                }
+              }
+              const toAdd = [];
+              if (!labels.includes('needs-codex-fix')) toAdd.push('needs-codex-fix');
+              if (!labels.includes('autofix/codex')) toAdd.push('autofix/codex');
+              let labelsReady = labels.includes('needs-codex-fix') && labels.includes('autofix/codex');
+              try {
+                if (toAdd.length > 0) {
+                  await github.rest.issues.addLabels({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    labels: toAdd,
+                  });
+                  labelsReady = true;
+                }
+              } catch (err) {
+                core.info(`Non-fatal: failed to add labels ${toAdd.join(', ')}: ${err}`);
+                if (!labelsReady) {
+                  core.info('Skip autofix dispatch from fallback review: required labels are missing.');
+                  return;
+                }
+              }
+
+              const safeToDispatch =
+                !pr.data.draft &&
+                pr.data.head?.repo?.full_name === `${owner}/${repo}` &&
+                !labels.includes('automation/off') &&
+                !labels.includes('no-bot') &&
+                !labels.includes('autofix/off');
+              if (!safeToDispatch) {
+                core.info('Skip autofix dispatch from fallback review: PR is not eligible.');
+                return;
+              }
+
+              try {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner,
+                  repo,
+                  workflow_id: 'codex-autofix-dispatch-batched.yml',
+                  ref: pr.data.base?.ref || 'main',
+                  inputs: {
+                    pr_number: String(prNumber),
+                    repo: `${owner}/${repo}`,
+                    sha: headSha,
+                    source: 'quota-fallback-review',
+                    attempt: '1',
+                    batch_window_seconds: '90',
+                    runner_label: runnerLabel,
+                    dry_run: dryRun ? 'true' : '',
+                    login_method: loginMethod,
+                    model,
+                    reasoning_effort: reasoningEffort,
+                    comment_id: fallbackCommentId,
+                    comment_kind: 'issue_comment',
+                  },
+                });
+                core.info(`Dispatched batched autofix from fallback review for PR #${prNumber}`);
+                return;
+              } catch (batchErr) {
+                core.warning(`Failed batched autofix dispatch from fallback review; using direct fallback: ${batchErr}`);
+              }
+
+              const markerMeta = [
+                'source=quota-fallback-review',
+                'attempt=1',
+                runnerLabel ? `runner=${runnerLabel}` : '',
+                dryRun ? 'dry_run=true' : '',
+                fallbackCommentId ? `trigger_comment_id=${fallbackCommentId}` : '',
+                fallbackCommentUrl ? `trigger_comment=${fallbackCommentUrl}` : '',
+              ].filter(Boolean).join('\n');
+              const markerBody = `<!-- codex-autofix:sha=${headSha} -->\nDispatching autofix for ${headSha}` +
+                (markerMeta ? `\n\n${markerMeta}` : '');
+
+              let markerCommentId = null;
+              try {
+                const markerComment = await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  body: markerBody,
+                });
+                markerCommentId = markerComment?.data?.id || null;
+              } catch (err) {
+                core.info(`Non-fatal: failed to write autofix dispatch marker from fallback review: ${err}`);
+              }
+
+              try {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner,
+                  repo,
+                  workflow_id: 'codex-autofix-selfhosted.yml',
+                  ref: pr.data.base?.ref || 'main',
+                  inputs: {
+                    pr_number: String(prNumber),
+                    repo: `${owner}/${repo}`,
+                    runner_label: runnerLabel,
+                    dry_run: dryRun ? 'true' : '',
+                    login_method: loginMethod,
+                    model,
+                    reasoning_effort: reasoningEffort,
+                    comment_id: fallbackCommentId,
+                    comment_kind: 'issue_comment',
+                    target_sha: headSha,
+                    attempt: '1',
+                    source: 'quota-fallback-review',
+                  },
+                });
+                core.info(`Dispatched codex-autofix-selfhosted from fallback review for PR #${prNumber}`);
+              } catch (err) {
+                core.warning(`Failed to dispatch codex-autofix-selfhosted from fallback review: ${err}`);
+                if (markerCommentId) {
+                  try {
+                    await github.rest.issues.deleteComment({
+                      owner,
+                      repo,
+                      comment_id: markerCommentId,
+                    });
+                  } catch (deleteErr) {
+                    core.info(`Non-fatal: failed to delete marker comment ${markerCommentId}: ${deleteErr}`);
+                  }
+                }
+              }
+            }

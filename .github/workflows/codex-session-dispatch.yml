@@ -1,0 +1,530 @@
+name: codex-session-dispatch
+
+on:
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+  actions: write
+
+jobs:
+  dispatch:
+    # We run on the self-hosted Codex runner so we can write into CODEX_HOME
+    # (useful when autofix is blocked by API quota).
+    concurrency:
+      group: codex-session-dispatch-pr-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      cancel-in-progress: false
+    runs-on: [self-hosted, codex]
+    steps:
+      - name: Route PR comment to Codex session
+        uses: actions/github-script@v7
+        env:
+          CODEX_HOME: ${{ env.CODEX_HOME }}
+          CODEX_SESSION_DISPATCH_URL: ${{ secrets.CODEX_SESSION_DISPATCH_URL }}
+          CODEX_SESSION_DISPATCH_TOKEN: ${{ secrets.CODEX_SESSION_DISPATCH_TOKEN }}
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const crypto = require('crypto');
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const ackMarker = '<!-- codex-session-dispatch:ack -->';
+            const inboundBody = String(context.payload?.comment?.body || '');
+            if (inboundBody.includes('codex-session-dispatch:ack')) {
+              core.info('Skip: ack comment (loop guard).');
+              return;
+            }
+            if (
+              inboundBody.includes('<!-- codex-autofix:') ||
+              inboundBody.includes('<!-- codex-review:') ||
+              inboundBody.includes('<!-- codex-rereview:') ||
+              inboundBody.includes('<!-- codex-selfhosted-review:')
+            ) {
+              core.info('Skip: codex marker comment (loop guard).');
+              return;
+            }
+
+            const event = context.eventName;
+            const comment = context.payload?.comment;
+            if (!comment) {
+              core.info('Skip: missing comment payload.');
+              return;
+            }
+
+            let prNumber;
+            let commentMeta = {};
+            if (event === 'pull_request_review_comment') {
+              prNumber = context.payload?.pull_request?.number;
+              commentMeta = {
+                kind: 'review_comment',
+                path: comment.path,
+                line: comment.line,
+                side: comment.side,
+                commit_id: comment.commit_id,
+              };
+            } else if (event === 'issue_comment') {
+              const issue = context.payload?.issue;
+              if (!issue?.pull_request) {
+                core.info('Skip: issue_comment is not for a PR.');
+                return;
+              }
+              prNumber = issue.number;
+              commentMeta = { kind: 'issue_comment' };
+            } else {
+              core.info(`Skip: unsupported event ${event}`);
+              return;
+            }
+
+            if (!prNumber) {
+              core.info('Skip: PR number missing.');
+              return;
+            }
+
+            if (event === 'issue_comment' && /(^|\n)\s*@codex\s+review\b/i.test(inboundBody)) {
+              core.info('Skip: @codex review is a command, not feedback.');
+              return;
+            }
+
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            const labels = (pr.data.labels || []).map(l => l.name);
+            const prBody = String(pr.data.body || '');
+            const author = String(comment.user?.login || '');
+
+            if (labels.includes('automation/off') || labels.includes('no-bot')) {
+              core.info('Skip: automation/off or no-bot present.');
+              return;
+            }
+
+            const inboundLower = inboundBody.toLowerCase();
+            const isCleanCodexVerdict =
+              event === 'issue_comment' &&
+              author.startsWith('chatgpt-codex-connector') &&
+              [
+                /didn['’]?t find (any )?major issues/,
+                /did not find (any )?major issues/,
+                /\bno major issues\b/,
+              ].some(re => re.test(inboundLower));
+            if (isCleanCodexVerdict) {
+              const headSha = String(pr.data.head?.sha || '').trim();
+              const markerRe = /<!--\s*codex-(?:re)?review:sha=([0-9a-f]{7,40})\s*-->/i;
+              const issueComments = await github.paginate(
+                github.rest.issues.listComments,
+                { owner, repo, issue_number: prNumber, per_page: 100 }
+              );
+
+              let lastMarkerIndex = -1;
+              let lastMarkerSha = '';
+              for (let i = issueComments.length - 1; i >= 0; i--) {
+                const body = String(issueComments[i]?.body || '');
+                const m = body.match(markerRe);
+                if (m) {
+                  lastMarkerIndex = i;
+                  lastMarkerSha = String(m[1] || '');
+                  break;
+                }
+              }
+
+              if (!headSha || lastMarkerIndex === -1 || lastMarkerSha !== headSha) {
+                core.info(
+                  `Skip: clean verdict sha not aligned (head=${headSha} last_marker=${lastMarkerSha} idx=${lastMarkerIndex})`
+                );
+                return;
+              }
+              const markerCreatedAt = String(issueComments[lastMarkerIndex]?.created_at || '');
+
+              const verdictIndex = issueComments.findIndex(c => Number(c?.id) === Number(comment.id));
+              if (verdictIndex !== -1 && verdictIndex < lastMarkerIndex) {
+                core.info(
+                  `Skip: clean verdict comment precedes marker (verdict_idx=${verdictIndex} marker_idx=${lastMarkerIndex})`
+                );
+                return;
+              }
+
+              const inlineComments = await github.paginate(
+                github.rest.pulls.listReviewComments,
+                { owner, repo, pull_number: prNumber, per_page: 100 }
+              );
+              const inlineFeedbackExists = inlineComments.some(c =>
+                String(c.user?.login || '').startsWith('chatgpt-codex-connector') &&
+                String(c.commit_id || '') === headSha &&
+                (!markerCreatedAt || String(c.created_at || '') >= markerCreatedAt)
+              );
+              if (inlineFeedbackExists) {
+                core.info('Skip: clean verdict matched, but Codex inline feedback still exists on head; keeping needs-codex-fix.');
+                core.info('Skip: clean Codex verdict is not routed to session inbox.');
+                return;
+              }
+
+              try {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  name: 'needs-codex-fix',
+                });
+                core.info('Clean Codex verdict: removed needs-codex-fix.');
+              } catch (err) {
+                if (err?.status !== 404) {
+                  core.info(`Non-fatal: failed to remove needs-codex-fix: ${err}`);
+                }
+              }
+              core.info('Skip: clean Codex verdict is not routed to session inbox.');
+              return;
+            }
+
+            const parseMarker = (re, text) => {
+              const m = text.match(re);
+              return m ? m[1] : '';
+            };
+
+            const sessionRe = /<!--\s*codex-session:\s*([A-Za-z0-9_-]{1,128})\s*-->/i;
+            const agentRe = /<!--\s*codex-agent:\s*([A-Za-z0-9_-]{1,128})\s*-->/i;
+            const dispatchAllRe = /<!--\s*codex-dispatch-all\s*-->/i;
+            const runnerMarkerRe = /<!--\s*codex-runner:\s*([A-Za-z0-9_-]{1,64})\s*-->/i;
+            const dryRunMarkerRe = /<!--\s*codex-autofix:dry-run\s*(?:=\s*(?:true|1|yes|y))?\s*-->/i;
+            const reviewFallbackMarkerRe =
+              /<!--\s*codex-selfhosted-review:sha=([0-9a-f]{7,40})\s+source=quota-fallback\s*-->/i;
+            const reviewFallbackRequestMarkerRe =
+              /<!--\s*codex-selfhosted-review:request sha=([0-9a-f]{7,40})\s+source=quota-fallback\s*-->/i;
+
+            let codexSession = parseMarker(sessionRe, prBody);
+            let codexAgent = parseMarker(agentRe, prBody);
+
+            if (!codexSession) {
+              for (const name of labels) {
+                const m = String(name).match(/^codex\/(?:session|sess):([A-Za-z0-9_-]{1,128})$/i);
+                if (m) {
+                  codexSession = m[1];
+                  break;
+                }
+              }
+            }
+
+            if (!codexAgent) {
+              for (const name of labels) {
+                const m = String(name).match(/^codex\/(?:agent|owner):([A-Za-z0-9_-]{1,128})$/i);
+                if (m) {
+                  codexAgent = m[1];
+                  break;
+                }
+              }
+            }
+
+            const dispatchAll = labels.includes('codex/dispatch-all') || dispatchAllRe.test(prBody);
+            const runnerMatch = prBody.match(runnerMarkerRe);
+            const runnerLabel = runnerMatch ? runnerMatch[1] : '';
+            const dryRun = dryRunMarkerRe.test(prBody);
+
+            let reviewFallbackDispatched = false;
+            let reviewFallbackSkipped = false;
+            let reviewFallbackError = '';
+            const isQuotaLimitComment =
+              event === 'issue_comment' &&
+              author.startsWith('chatgpt-codex-connector') &&
+              [
+                /\bcodex usage limits\b.*\bcode reviews\b/,
+                /\breached your codex usage limits\b.*\bcode reviews\b/,
+                /\busage limits\b.*\bcode reviews\b/,
+              ].some(re => re.test(inboundLower));
+            if (isQuotaLimitComment) {
+              const headSha = String(pr.data.head?.sha || '').trim();
+              if (pr.data.draft) {
+                reviewFallbackSkipped = true;
+                core.info('Skip quota fallback review dispatch: PR is draft.');
+              } else if (pr.data.head?.repo?.full_name !== `${owner}/${repo}`) {
+                reviewFallbackSkipped = true;
+                core.info('Skip quota fallback review dispatch: PR is from a fork.');
+              } else if (!headSha) {
+                reviewFallbackSkipped = true;
+                core.info('Skip quota fallback review dispatch: missing head SHA.');
+              } else {
+                const issueComments = await github.paginate(
+                  github.rest.issues.listComments,
+                  { owner, repo, issue_number: prNumber, per_page: 100 }
+                );
+                const toMs = (value) => {
+                  const ms = Date.parse(String(value || ''));
+                  return Number.isFinite(ms) ? ms : 0;
+                };
+                let alreadyReviewed = false;
+                let latestRequestMs = 0;
+                for (const c of issueComments) {
+                  const body = String(c.body || '');
+                  const reviewedMatch = body.match(reviewFallbackMarkerRe);
+                  if (reviewedMatch && headSha.startsWith(String(reviewedMatch[1] || ''))) {
+                    alreadyReviewed = true;
+                    break;
+                  }
+                  const requestMatch = body.match(reviewFallbackRequestMarkerRe);
+                  if (requestMatch && headSha.startsWith(String(requestMatch[1] || ''))) {
+                    latestRequestMs = Math.max(latestRequestMs, toMs(c.created_at));
+                  }
+                }
+                if (alreadyReviewed) {
+                  reviewFallbackSkipped = true;
+                  core.info(`Skip quota fallback review dispatch: already reviewed head sha ${headSha}.`);
+                } else {
+                  const requestCooldownMs = 15 * 60 * 1000;
+                  let allowDispatch = true;
+                  if (latestRequestMs > 0) {
+                    const requestAgeMs = Date.now() - latestRequestMs;
+                    if (requestAgeMs < requestCooldownMs) {
+                      reviewFallbackSkipped = true;
+                      allowDispatch = false;
+                      core.info(
+                        `Skip quota fallback review dispatch: request already in-flight for head sha ${headSha} (age_ms=${requestAgeMs}).`
+                      );
+                    } else {
+                      core.info(
+                        `Retry quota fallback review dispatch after stale request for head sha ${headSha} (age_ms=${requestAgeMs}).`
+                      );
+                    }
+                  }
+                  if (allowDispatch) {
+                    const triggerCommentId = String(comment.id || '');
+                    const triggerCommentUrl = String(comment.html_url || '');
+                    const requestMarkerMeta = [
+                      `trigger_comment_id=${triggerCommentId}`,
+                      triggerCommentUrl ? `trigger_comment=${triggerCommentUrl}` : '',
+                    ].filter(Boolean).join('\n');
+                    const requestMarkerBody =
+                      `<!-- codex-selfhosted-review:request sha=${headSha} source=quota-fallback -->\n` +
+                      `Dispatching self-hosted review fallback for ${headSha}` +
+                      (requestMarkerMeta ? `\n\n${requestMarkerMeta}` : '');
+                    let requestMarkerCommentId = null;
+                    try {
+                      const requestComment = await github.rest.issues.createComment({
+                        owner,
+                        repo,
+                        issue_number: prNumber,
+                        body: requestMarkerBody,
+                      });
+                      requestMarkerCommentId = requestComment?.data?.id || null;
+                      await github.rest.actions.createWorkflowDispatch({
+                        owner,
+                        repo,
+                        workflow_id: 'codex-review-selfhosted.yml',
+                        ref: pr.data.base?.ref || 'main',
+                        inputs: {
+                          pr_number: String(prNumber),
+                          repo: `${owner}/${repo}`,
+                          runner_label: runnerLabel,
+                          trigger_comment_id: String(comment.id || ''),
+                        },
+                      });
+                      reviewFallbackDispatched = true;
+                      core.info(`Dispatched codex-review-selfhosted for PR #${prNumber}`);
+                    } catch (err) {
+                      reviewFallbackError = String(err);
+                      core.warning(`Quota fallback review dispatch failed: ${err}`);
+                      if (requestMarkerCommentId) {
+                        try {
+                          await github.rest.issues.deleteComment({
+                            owner,
+                            repo,
+                            comment_id: requestMarkerCommentId,
+                          });
+                        } catch (deleteErr) {
+                          core.info(
+                            `Non-fatal: failed to delete fallback request marker ${requestMarkerCommentId}: ${deleteErr}`
+                          );
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            if (!codexSession && !codexAgent && !dispatchAll) {
+              core.info('Skip: no codex-session / codex-agent binding on PR (and dispatch-all not set).');
+              return;
+            }
+            const isBot = author.endsWith('[bot]');
+            if (isBot && !author.startsWith('chatgpt-codex-connector')) {
+              core.info(`Skip: bot comment author=${author}`);
+              return;
+            }
+
+            const codexHome = (process.env.CODEX_HOME || path.join(process.env.HOME || '', '.codex')).trim();
+            if (!codexSession) {
+              try {
+                const sessionMapPath = path.join(codexHome, 'state', 'github_pr_autofix_sessions.json');
+                const sessionKey = `${owner}/${repo}#${prNumber}`;
+                const sessionMap = JSON.parse(fs.readFileSync(sessionMapPath, 'utf8'));
+                const mapped = sessionMap[sessionKey];
+                if (mapped) {
+                  codexSession = String(mapped);
+                }
+              } catch (err) {
+                // Ignore missing/unreadable mapping file; it is populated on the first self-hosted run.
+              }
+            }
+            if (!codexAgent && codexSession) {
+              codexAgent = 'selfhosted';
+            }
+
+            const correlationId = crypto.randomUUID();
+
+            const payload = {
+              correlation_id: correlationId,
+              event,
+              repo: `${owner}/${repo}`,
+              pr_number: prNumber,
+              pr_url: pr.data.html_url,
+              codex_session: codexSession || null,
+              codex_agent: codexAgent || null,
+              comment: {
+                id: comment.id,
+                url: comment.html_url,
+                author,
+                created_at: comment.created_at,
+                body: String(comment.body || ''),
+                ...commentMeta,
+              },
+            };
+
+            const inboxDir = path.join(codexHome, 'inbox');
+            const queuePath = path.join(inboxDir, 'github_pr_comments.jsonl');
+
+            try {
+              fs.mkdirSync(inboxDir, { recursive: true });
+              fs.appendFileSync(queuePath, JSON.stringify(payload) + '\n', { encoding: 'utf8' });
+              core.info(`Queued payload to ${queuePath}`);
+            } catch (err) {
+              core.warning(`Failed to write queue file: ${err}`);
+            }
+
+            let webhookStatus = 'skipped';
+            let webhookError = '';
+            const webhookUrl = String(process.env.CODEX_SESSION_DISPATCH_URL || '').trim();
+            const webhookToken = String(process.env.CODEX_SESSION_DISPATCH_TOKEN || '').trim();
+            if (webhookUrl) {
+              try {
+                const headers = {
+                  'content-type': 'application/json',
+                  'user-agent': 'codex-session-dispatch',
+                };
+                if (webhookToken) {
+                  headers['authorization'] = `Bearer ${webhookToken}`;
+                }
+
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 10_000);
+                const resp = await fetch(webhookUrl, {
+                  method: 'POST',
+                  headers,
+                  body: JSON.stringify(payload),
+                  signal: controller.signal,
+                }).finally(() => clearTimeout(timeout));
+
+                if (!resp.ok) {
+                  const text = await resp.text().catch(() => '');
+                  throw new Error(`HTTP ${resp.status}: ${text.slice(0, 500)}`);
+                }
+                webhookStatus = 'ok';
+              } catch (err) {
+                webhookStatus = 'failed';
+                webhookError = String(err);
+                core.warning(`Webhook dispatch failed: ${err}`);
+              }
+            }
+
+            const allowAutofix = labels.includes('autofix/codex') && !labels.includes('autofix/off');
+            const shouldDispatchAutofix = dispatchAll && allowAutofix && !isBot;
+            let autofixDispatched = false;
+            let autofixError = '';
+            if (shouldDispatchAutofix) {
+              const headSha = String(pr.data.head?.sha || '').trim();
+              try {
+                if (!labels.includes('needs-codex-fix')) {
+                  await github.rest.issues.addLabels({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    labels: ['needs-codex-fix'],
+                  });
+                }
+
+                try {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner,
+                    repo,
+                    workflow_id: 'codex-autofix-dispatch-batched.yml',
+                    ref: pr.data.base?.ref || 'main',
+                    inputs: {
+                      pr_number: String(prNumber),
+                      repo: `${owner}/${repo}`,
+                      sha: headSha,
+                      source: 'session-dispatch',
+                      attempt: '1',
+                      batch_window_seconds: '90',
+                      runner_label: runnerLabel,
+                      dry_run: dryRun ? 'true' : '',
+                      comment_id: String(comment.id),
+                      comment_kind: String(commentMeta.kind || ''),
+                    },
+                  });
+                } catch (batchErr) {
+                  core.warning(`Session-dispatch batched autofix failed; using direct fallback: ${batchErr}`);
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner,
+                    repo,
+                    workflow_id: 'codex-autofix-selfhosted.yml',
+                    ref: pr.data.base?.ref || 'main',
+                    inputs: {
+                      pr_number: String(prNumber),
+                      repo: `${owner}/${repo}`,
+                      runner_label: runnerLabel,
+                      dry_run: dryRun ? 'true' : '',
+                      comment_id: String(comment.id),
+                      comment_kind: String(commentMeta.kind || ''),
+                      target_sha: headSha,
+                      attempt: '1',
+                      source: 'session-dispatch',
+                    },
+                  });
+                }
+                autofixDispatched = true;
+              } catch (err) {
+                autofixError = String(err);
+                core.warning(`Autofix dispatch failed: ${err}`);
+              }
+            }
+
+            const queueDisplay = queuePath.replace(process.env.HOME || '', '~');
+            const lines = [
+              ackMarker,
+              'Routed PR comment to Codex session inbox.',
+              '',
+              `session=${codexSession || ''}`,
+              `agent=${codexAgent || ''}`,
+              `event=${event}`,
+              `comment=${comment.html_url}`,
+              `correlation_id=${correlationId}`,
+              `queue=${queueDisplay}`,
+              `webhook=${webhookStatus}`,
+              `autofix_dispatched=${autofixDispatched ? 'true' : 'false'}`,
+              `review_fallback_dispatched=${reviewFallbackDispatched ? 'true' : 'false'}`,
+            ];
+            if (webhookError) lines.push(`error=${webhookError}`);
+            if (autofixError) lines.push(`autofix_error=${autofixError}`);
+            if (reviewFallbackSkipped) lines.push('review_fallback_skipped=true');
+            if (reviewFallbackError) lines.push(`review_fallback_error=${reviewFallbackError}`);
+            if (!webhookUrl) lines.push('note=Set CODEX_SESSION_DISPATCH_URL secret to enable webhook routing.');
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body: lines.join('\n'),
+            });
