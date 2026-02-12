@@ -1,0 +1,285 @@
+name: codex-autofix-on-command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch self-hosted autofix on @codex command
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const issue = context.payload?.issue;
+            const comment = context.payload?.comment;
+            if (!issue?.pull_request) {
+              core.info('Skip: issue_comment is not for a PR.');
+              return;
+            }
+            if (!comment) {
+              core.info('Skip: missing comment payload.');
+              return;
+            }
+
+            const commandBody = String(comment.body || '');
+            const commandRe =
+              /@codex\s+(respond\s+that\s+feedback|address\s+that\s+feedback)\b/i;
+            if (!commandRe.test(commandBody)) {
+              core.info('Skip: no @codex command match.');
+              return;
+            }
+
+            const author = String(comment.user?.login || '');
+            const association = String(comment.author_association || '').toUpperCase();
+            const allowedAssociations = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+            if (!allowedAssociations.has(association)) {
+              core.info(`Skip: author_association=${association} author=${author}`);
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = issue.number;
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            if (String(pr.data.state || '').toLowerCase() !== 'open') {
+              core.info(`Skip: PR is not open (state=${pr.data.state}).`);
+              return;
+            }
+            const labels = (pr.data.labels || []).map(l => l.name);
+
+            if (labels.includes('automation/off') || labels.includes('no-bot') || labels.includes('autofix/off')) {
+              core.info('Skip: automation/off, no-bot, or autofix/off present.');
+              return;
+            }
+
+            if (pr.data.draft) {
+              core.info('Skip: PR is draft.');
+              return;
+            }
+            if (pr.data.head?.repo?.full_name !== `${owner}/${repo}`) {
+              core.info('Skip: PR is from a fork.');
+              return;
+            }
+
+            const toAdd = [];
+            if (!labels.includes('needs-codex-fix')) toAdd.push('needs-codex-fix');
+            if (!labels.includes('autofix/codex')) toAdd.push('autofix/codex');
+            if (toAdd.length > 0) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: prNumber,
+                labels: toAdd,
+              });
+              core.info(`Added labels: ${toAdd.join(', ')}`);
+              labels.push(...toAdd);
+            }
+
+            if (!labels.includes('autofix/codex') || !labels.includes('needs-codex-fix')) {
+              core.info('Skip: requires autofix/codex + needs-codex-fix.');
+              return;
+            }
+
+            const sha = pr.data.head?.sha;
+            if (!sha) {
+              core.info('Skip: missing PR head SHA.');
+              return;
+            }
+
+            const prBody = String(pr.data.body || '');
+            // Markers must be on their own line to avoid accidental matches in docs/backticks.
+            const runnerMarkerRe = /(?:^|\n)[ \t]*<!--[ \t]*codex-runner:[ \t]*([A-Za-z0-9_-]{1,64})[ \t]*-->[ \t]*(?:\n|$)/i;
+            const dryRunMarkerRe = /(?:^|\n)[ \t]*<!--[ \t]*codex-autofix:dry-run[ \t]*(?:=[ \t]*(?:true|1|yes|y))?[ \t]*-->[ \t]*(?:\n|$)/i;
+            const runnerMatch = prBody.match(runnerMarkerRe);
+            const runnerLabel = runnerMatch ? runnerMatch[1] : '';
+            const dryRun = dryRunMarkerRe.test(prBody);
+
+            const resultRe =
+              /<!--\s*codex-autofix:result sha=([0-9a-f]{7,40})\s+status=([a-z]+)\s*-->/i;
+            const markerRe = /<!--\s*codex-autofix:sha=([0-9a-f]{7,40})\s*-->/i;
+            const issueComments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+            const toMs = (value) => {
+              const ms = Date.parse(String(value || ''));
+              return Number.isFinite(ms) ? ms : 0;
+            };
+
+            // Scan newest-first for the latest result/marker for this head SHA.
+            let latestResult = null; // { status: string, created_at: string }
+            let latestMarker = null; // { created_at: string }
+            let forceRetry = false;
+            for (let i = issueComments.length - 1; i >= 0; i--) {
+              const c = issueComments[i];
+              const body = String(c.body || '');
+
+              if (!latestResult) {
+                const resultMatch = body.match(resultRe);
+                if (resultMatch && sha.startsWith(resultMatch[1])) {
+                  latestResult = {
+                    status: String(resultMatch[2] || '').toLowerCase(),
+                    created_at: String(c.created_at || ''),
+                  };
+                }
+              }
+
+              if (!latestMarker) {
+                const markerMatch = body.match(markerRe);
+                if (markerMatch && markerMatch[1] === sha) {
+                  latestMarker = { created_at: String(c.created_at || '') };
+                }
+              }
+
+              if (latestResult && latestMarker) break;
+            }
+
+            if (latestMarker && latestResult) {
+              const markerMs = toMs(latestMarker.created_at);
+              const resultMs = toMs(latestResult.created_at);
+              if (markerMs > resultMs) {
+                const ageMs = Date.now() - markerMs;
+                if (ageMs < 10 * 60 * 1000) {
+                  core.info(`Already dispatched for sha ${sha}; in-flight marker is newer than last result.`);
+                  return;
+                }
+                forceRetry = true;
+                core.info(`Stale in-flight marker newer than last result for sha ${sha} (age_ms=${ageMs}); retrying.`);
+              }
+            }
+
+            if (latestResult) {
+              if (latestResult.status === 'success') {
+                if (forceRetry) {
+                  core.info(`Retrying after stale in-flight marker for sha ${sha}.`);
+                } else {
+                  // If new Codex feedback was posted after a successful run on the same SHA,
+                  // allow re-dispatch to avoid "dummy commit" retries.
+                  const reviewComments = await github.paginate(
+                    github.rest.pulls.listReviewComments,
+                    { owner, repo, pull_number: prNumber, per_page: 100 }
+                  );
+                  const newestCodexMs = reviewComments.reduce((acc, rc) => {
+                    const author = String((rc.user || {}).login || '');
+                    if (!author.startsWith('chatgpt-codex-connector')) return acc;
+                    if (String(rc.commit_id || '') !== sha) return acc;
+                    const t = toMs(rc.updated_at || rc.created_at);
+                    return Math.max(acc, t);
+                  }, 0);
+                  const lastResultMs = toMs(latestResult.created_at);
+
+                  if (newestCodexMs <= lastResultMs) {
+                    core.info(`Already successful for sha ${sha}; skipping.`);
+                    return;
+                  }
+
+                  core.info(`New Codex feedback after last success for sha ${sha}; re-dispatching.`);
+                }
+              } else {
+                // Treat any non-success as retryable (failure/cancelled/unknown).
+                core.info(`Previous run status=${latestResult.status} for sha ${sha}; retrying.`);
+              }
+            } else if (latestMarker) {
+              // Marker without a terminal result usually means "in-flight" or cancelled before reporting.
+              // Allow a forced retry if the marker is stale.
+              const ageMs = Date.now() - toMs(latestMarker.created_at);
+              if (ageMs < 10 * 60 * 1000) {
+                core.info(`Already dispatched for sha ${sha} and no terminal result found yet; skipping.`);
+                return;
+              }
+              core.info(`Marker exists without terminal result for sha ${sha} (age_ms=${ageMs}); re-dispatching.`);
+            }
+
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'codex-autofix-dispatch-batched.yml',
+                ref: pr.data.base?.ref || 'main',
+                inputs: {
+                  pr_number: String(prNumber),
+                  repo: `${owner}/${repo}`,
+                  sha: sha,
+                  source: 'on-command',
+                  attempt: '1',
+                  batch_window_seconds: '90',
+                  runner_label: runnerLabel,
+                  dry_run: dryRun ? 'true' : '',
+                  comment_id: String(comment.id || ''),
+                  comment_kind: 'issue_comment',
+                },
+              });
+              core.info(`Dispatched batched autofix for PR #${prNumber}`);
+              return;
+            } catch (batchError) {
+              core.warning(`Batched dispatch failed; falling back to direct dispatch: ${batchError}`);
+            }
+
+            const markerMeta = [
+              'source=on-command',
+              'attempt=1',
+              runnerLabel ? `runner=${runnerLabel}` : '',
+              dryRun ? 'dry_run=true' : '',
+              `trigger_comment=${comment.html_url}`,
+            ].filter(Boolean).join('\n');
+            const markerBody = `<!-- codex-autofix:sha=${sha} -->\nDispatching autofix for ${sha}` +
+              (markerMeta ? `\n\n${markerMeta}` : '');
+
+            let markerCommentId = null;
+            try {
+              const markerComment = await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: markerBody,
+              });
+              markerCommentId = markerComment?.data?.id || null;
+            } catch (error) {
+              core.setFailed(`Autofix not dispatched for sha ${sha}: failed to write marker comment: ${error}`);
+              return;
+            }
+
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'codex-autofix-selfhosted.yml',
+                ref: 'main',
+                inputs: {
+                  pr_number: String(prNumber),
+                  repo: `${owner}/${repo}`,
+                  runner_label: runnerLabel,
+                  dry_run: dryRun ? 'true' : '',
+                  comment_id: String(comment.id || ''),
+                  comment_kind: 'issue_comment',
+                  target_sha: sha,
+                  attempt: '1',
+                  source: 'on-command',
+                },
+              });
+            } catch (error) {
+              core.setFailed(`Failed to dispatch autofix for sha ${sha}: ${error}`);
+              if (markerCommentId) {
+                try {
+                  await github.rest.issues.deleteComment({
+                    owner,
+                    repo,
+                    comment_id: markerCommentId,
+                  });
+                } catch (deleteError) {
+                  core.info(`Failed to delete marker comment ${markerCommentId} after dispatch error: ${deleteError}`);
+                }
+              }
+              return;
+            }
+
+            core.info(`Dispatched codex-autofix-selfhosted for PR #${prNumber}`);

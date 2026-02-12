@@ -1,0 +1,982 @@
+name: codex-autofix-selfhosted
+run-name: "codex-autofix pr=${{ inputs.pr_number || 'n/a' }} sha=${{ inputs.target_sha || 'head' }} attempt=${{ inputs.attempt || '1' }} source=${{ inputs.source || 'manual' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to autofix"
+        required: true
+      repo:
+        description: "owner/repo (defaults to current)"
+        required: false
+      runner_label:
+        description: "Optional self-hosted runner label to target (appended to [self-hosted,codex])"
+        required: false
+      dry_run:
+        description: "If true, do not push changes (report only)"
+        required: false
+      login_method:
+        description: "Codex auth method override: chatgpt|api|auto (default: vars.CODEX_AUTOFIX_LOGIN_METHOD or auto)"
+        required: false
+      model:
+        description: "Optional Codex model override (default: vars.CODEX_AUTOFIX_MODEL or gpt-5.3-codex)"
+        required: false
+      reasoning_effort:
+        description: "Optional reasoning effort override (default: vars.CODEX_AUTOFIX_REASONING_EFFORT or xhigh)"
+        required: false
+      comment_id:
+        description: "Optional PR comment id that triggered this run"
+        required: false
+      comment_kind:
+        description: "Optional comment kind: review_comment|issue_comment"
+        required: false
+      target_sha:
+        description: "Optional target head SHA; run skips if PR head changed"
+        required: false
+      attempt:
+        description: "Autofix attempt number (1..2)"
+        required: false
+      source:
+        description: "Optional dispatch source marker"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: codex-autofix-${{ inputs.pr_number || github.run_id }}-${{ inputs.target_sha || 'head' }}
+  cancel-in-progress: true
+
+jobs:
+  autofix:
+    if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
+    runs-on: ${{ fromJSON(inputs.runner_label && format('["self-hosted","codex","{0}"]', inputs.runner_label) || '["self-hosted","codex"]') }}
+    steps:
+      - name: Resolve PR context
+        id: pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER_INPUT: ${{ inputs.pr_number }}
+          REPO_INPUT: ${{ inputs.repo }}
+          RUNNER_LABEL_INPUT: ${{ inputs.runner_label }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          LOGIN_METHOD_INPUT: ${{ inputs.login_method }}
+          DEFAULT_LOGIN_METHOD: ${{ vars.CODEX_AUTOFIX_LOGIN_METHOD }}
+          MODEL_INPUT: ${{ inputs.model }}
+          DEFAULT_MODEL: ${{ vars.CODEX_AUTOFIX_MODEL }}
+          REASONING_EFFORT_INPUT: ${{ inputs.reasoning_effort }}
+          DEFAULT_REASONING_EFFORT: ${{ vars.CODEX_AUTOFIX_REASONING_EFFORT }}
+          COMMENT_ID_INPUT: ${{ inputs.comment_id }}
+          COMMENT_KIND_INPUT: ${{ inputs.comment_kind }}
+          TARGET_SHA_INPUT: ${{ inputs.target_sha }}
+          ATTEMPT_INPUT: ${{ inputs.attempt }}
+          SOURCE_INPUT: ${{ inputs.source }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          DEFAULT_REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+          import urllib.parse
+
+          event_name = os.environ.get("EVENT_NAME") or os.environ.get("GITHUB_EVENT_NAME")
+          event_path = os.environ.get("EVENT_PATH") or os.environ.get("GITHUB_EVENT_PATH")
+          pr_number = os.environ.get("PR_NUMBER_INPUT") or ""
+          repo = os.environ.get("REPO_INPUT") or os.environ.get("DEFAULT_REPO")
+          runner_label = (os.environ.get("RUNNER_LABEL_INPUT") or "").strip()
+          dry_run_raw = (os.environ.get("DRY_RUN_INPUT") or "").strip().lower()
+          dry_run = dry_run_raw in {"1", "true", "yes", "y"}
+          login_method_raw = (os.environ.get("LOGIN_METHOD_INPUT") or "").strip().lower()
+          default_login_method = (os.environ.get("DEFAULT_LOGIN_METHOD") or "").strip().lower()
+          login_method = login_method_raw or default_login_method or "auto"
+          model_raw = (os.environ.get("MODEL_INPUT") or "").strip()
+          default_model = (os.environ.get("DEFAULT_MODEL") or "").strip()
+          model = model_raw or default_model or "gpt-5.3-codex"
+          reasoning_effort_raw = (os.environ.get("REASONING_EFFORT_INPUT") or "").strip().lower()
+          default_reasoning_effort = (os.environ.get("DEFAULT_REASONING_EFFORT") or "").strip().lower()
+          reasoning_effort = reasoning_effort_raw or default_reasoning_effort or "xhigh"
+          comment_id = (os.environ.get("COMMENT_ID_INPUT") or "").strip()
+          comment_kind = (os.environ.get("COMMENT_KIND_INPUT") or "").strip()
+          target_sha = (os.environ.get("TARGET_SHA_INPUT") or "").strip().lower()
+          attempt_raw = (os.environ.get("ATTEMPT_INPUT") or "").strip() or "1"
+          source = (os.environ.get("SOURCE_INPUT") or "").strip().lower() or "manual"
+
+          if runner_label and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", runner_label):
+              raise SystemExit("Invalid runner_label (allowed: [A-Za-z0-9_-]{1,64})")
+          if login_method not in {"auto", "api", "chatgpt"}:
+              raise SystemExit("Invalid login_method (expected: auto|api|chatgpt)")
+          if model and not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", model):
+              raise SystemExit("Invalid model (allowed: [A-Za-z0-9_.-]{1,128})")
+          if reasoning_effort and not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", reasoning_effort):
+              raise SystemExit("Invalid reasoning_effort (allowed: [A-Za-z0-9_-]{1,32})")
+          if comment_id and not re.fullmatch(r"\d{1,32}", comment_id):
+              raise SystemExit("Invalid comment_id (expected numeric id)")
+          if comment_kind and comment_kind not in {"review_comment", "issue_comment"}:
+              raise SystemExit("Invalid comment_kind (expected review_comment|issue_comment)")
+          if target_sha and not re.fullmatch(r"[0-9a-f]{7,40}", target_sha):
+              raise SystemExit("Invalid target_sha (expected [0-9a-f]{7,40})")
+          if not re.fullmatch(r"\d{1,2}", attempt_raw):
+              raise SystemExit("Invalid attempt (expected 1..2)")
+          attempt = int(attempt_raw)
+          if attempt < 1 or attempt > 2:
+              raise SystemExit("Invalid attempt (expected 1..2)")
+          if not re.fullmatch(r"[a-z0-9_-]{1,64}", source):
+              raise SystemExit("Invalid source (allowed: [a-z0-9_-]{1,64})")
+
+          token = os.environ["GITHUB_TOKEN"]
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "codex-autofix",
+          }
+
+          def get_json(url):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  return json.load(resp)
+
+          if event_name != "workflow_dispatch" and event_path:
+              with open(event_path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              pr = data.get("pull_request") or {}
+              pr_number = str(pr.get("number") or "")
+              base = pr.get("base") or {}
+              base_repo = base.get("repo") or {}
+              base_owner = (base_repo.get("owner") or {}).get("login")
+              base_name = base_repo.get("name")
+              if base_owner and base_name:
+                  repo = f"{base_owner}/{base_name}"
+
+          if not pr_number and event_name != "workflow_dispatch":
+              ref = os.environ.get("GITHUB_REF") or os.environ.get("GITHUB_REF_NAME") or ""
+              match = re.search(r"pull/(\d+)", ref)
+              if match:
+                  pr_number = match.group(1)
+
+          if not pr_number and event_name != "workflow_dispatch":
+              head_ref = os.environ.get("GITHUB_HEAD_REF") or ""
+              if head_ref and repo:
+                  owner, repo_name = repo.split("/", 1)
+                  head = urllib.parse.quote(f"{owner}:{head_ref}", safe="")
+                  prs = get_json(
+                      f"https://api.github.com/repos/{repo}/pulls?head={head}&state=open&per_page=1"
+                  )
+                  if prs:
+                      pr_number = str(prs[0].get("number") or "")
+
+          if not pr_number:
+              raise SystemExit("pr_number could not be resolved; set workflow_dispatch inputs")
+
+          pr_data = get_json(f"https://api.github.com/repos/{repo}/pulls/{pr_number}")
+          head = pr_data.get("head") or {}
+          head_repo = (head.get("repo") or {}).get("full_name")
+          head_ref = head.get("ref")
+          head_sha = head.get("sha")
+          draft = bool(pr_data.get("draft"))
+          labels = {l.get("name") for l in pr_data.get("labels", [])}
+
+          stale_trigger = bool(target_sha and head_sha and head_sha != target_sha)
+          if stale_trigger:
+              out = os.environ["GITHUB_OUTPUT"]
+              with open(out, "a", encoding="utf-8") as f:
+                  f.write(f"pr_number={pr_number}\n")
+                  f.write(f"repo={repo}\n")
+                  f.write(f"head_repo={head_repo}\n")
+                  f.write(f"head_ref={head_ref}\n")
+                  f.write(f"head_sha={head_sha}\n")
+                  f.write(f"target_sha={target_sha}\n")
+                  f.write(f"attempt={attempt}\n")
+                  f.write(f"source={source}\n")
+                  f.write("skip_run=true\n")
+              raise SystemExit(0)
+
+          if head_repo != repo:
+              raise SystemExit("Refusing to run on forked PRs")
+          if draft:
+              raise SystemExit("Refusing to run on draft PRs")
+          if "automation/off" in labels or "no-bot" in labels or "autofix/off" in labels:
+              raise SystemExit("automation/off, no-bot, or autofix/off present; aborting")
+          if "autofix/codex" not in labels or "needs-codex-fix" not in labels:
+              raise SystemExit("autofix/codex + needs-codex-fix required")
+
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as f:
+              f.write(f"pr_number={pr_number}\n")
+              f.write(f"repo={repo}\n")
+              f.write(f"head_repo={head_repo}\n")
+              f.write(f"head_ref={head_ref}\n")
+              f.write(f"head_sha={head_sha}\n")
+              f.write(f"target_sha={target_sha or head_sha}\n")
+              f.write(f"attempt={attempt}\n")
+              f.write(f"source={source}\n")
+              f.write(f"runner_label={runner_label}\n")
+              f.write(f"dry_run={'true' if dry_run else 'false'}\n")
+              f.write(f"codex_login_method={login_method}\n")
+              f.write(f"codex_model={model}\n")
+              f.write(f"codex_reasoning_effort={reasoning_effort}\n")
+              f.write(f"comment_id={comment_id}\n")
+              f.write(f"comment_kind={comment_kind}\n")
+              f.write("skip_run=false\n")
+          PY
+
+      - name: Checkout PR head
+        if: steps.pr.outputs.skip_run != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pr.outputs.head_repo }}
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+          token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        if: steps.pr.outputs.skip_run != 'true'
+        run: |
+          git config user.name "greatTribe"
+          git config user.email "greatTribe@users.noreply.github.com"
+
+      - name: Capture feedback
+        id: feedback
+        if: steps.pr.outputs.skip_run != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          REPO: ${{ steps.pr.outputs.repo }}
+          COMMENT_ID: ${{ steps.pr.outputs.comment_id }}
+          COMMENT_KIND: ${{ steps.pr.outputs.comment_kind }}
+          FEEDBACK_FILE: ${{ runner.temp }}/codex_feedback.md
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          owner, repo = os.environ["REPO"].split("/", 1)
+          pr_number = os.environ["PR_NUMBER"]
+          token = os.environ["GITHUB_TOKEN"]
+          feedback_file = os.environ["FEEDBACK_FILE"]
+          comment_id = (os.environ.get("COMMENT_ID") or "").strip()
+          comment_kind = (os.environ.get("COMMENT_KIND") or "").strip()
+          if not pr_number:
+              raise SystemExit("PR_NUMBER is required")
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "User-Agent": "codex-autofix",
+          }
+
+          def get_json(url):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req) as resp:
+                  return json.load(resp)
+
+          trigger_comment = None
+          if comment_id and comment_kind in {"review_comment", "issue_comment"}:
+              if comment_kind == "review_comment":
+                  trigger_comment = get_json(
+                      f"https://api.github.com/repos/{owner}/{repo}/pulls/comments/{comment_id}"
+                  )
+              else:
+                  trigger_comment = get_json(
+                      f"https://api.github.com/repos/{owner}/{repo}/issues/comments/{comment_id}"
+                  )
+
+          pr = get_json(f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}")
+          head_sha = ((pr.get("head") or {}).get("sha") or "").strip()
+
+          issue_comments = []
+          page = 1
+          while True:
+              batch = get_json(
+                  f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments?per_page=100&page={page}"
+              )
+              if not batch:
+                  break
+              issue_comments.extend(batch)
+              page += 1
+              if page > 50:
+                  raise SystemExit("Exceeded pagination limit for issue comments")
+
+          round_start = ""
+          marker_re = re.compile(r"<!--\s*codex-(?:re)?review:sha=([0-9a-f]{7,40})\s*-->", re.I)
+          for c in reversed(issue_comments):
+              body = (c.get("body") or "")
+              m = marker_re.search(body)
+              if not m:
+                  continue
+              marker_sha = (m.group(1) or "").strip()
+              if marker_sha and head_sha.startswith(marker_sha):
+                  round_start = (c.get("created_at") or "").strip()
+                  break
+
+          comments = []
+          page = 1
+          while True:
+              batch = get_json(
+                  f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page=100&page={page}"
+              )
+              if not batch:
+                  break
+              comments.extend(batch)
+              page += 1
+              if page > 50:
+                  raise SystemExit("Exceeded pagination limit for PR comments")
+          codex_comments = [
+              c for c in comments
+              if (c.get("user") or {}).get("login", "").startswith("chatgpt-codex-connector")
+          ]
+          if head_sha:
+              codex_comments = [c for c in codex_comments if (c.get("commit_id") or "") == head_sha]
+          if round_start:
+              codex_comments = [c for c in codex_comments if (c.get("created_at") or "") >= round_start]
+
+          # Ensure the triggering review comment is included even if listReviewComments is briefly stale.
+          if trigger_comment and isinstance(trigger_comment, dict):
+              trigger_id = trigger_comment.get("id")
+              trigger_login = ((trigger_comment.get("user") or {}).get("login") or "")
+              trigger_commit_id = (trigger_comment.get("commit_id") or "")
+              trigger_created_at = (trigger_comment.get("created_at") or "")
+              if trigger_id and trigger_login.startswith("chatgpt-codex-connector"):
+                  if (not head_sha or trigger_commit_id == head_sha) and (
+                      not round_start or trigger_created_at >= round_start
+                  ):
+                      already = any(c.get("id") == trigger_id for c in codex_comments)
+                      if not already:
+                          codex_comments.append(trigger_comment)
+
+          def sanitize_body(body: str) -> str:
+              body = body or ""
+              # Strip HTML wrappers (e.g., <sub>...</sub>) and badge images.
+              body = re.sub(r"</?sub\b[^>]*>", "", body, flags=re.I)
+              body = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", body)
+              # Drop "Useful? React with ..." boilerplate.
+              body = re.sub(r"\n\nUseful\?\s*React with.*$", "", body, flags=re.S)
+              return body.strip()
+
+          def extract_title(body: str) -> str:
+              body = body or ""
+              for line in body.splitlines():
+                  first = line.strip()
+                  if not first:
+                      continue
+                  first = re.sub(r"</?sub\b[^>]*>", "", first, flags=re.I)
+                  first = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", first)
+                  first = first.replace("**", "").strip()
+                  first = re.sub(r"\s+", " ", first).strip()
+                  first = re.sub(r"^P\d\s+Badge\s+", "", first, flags=re.I)
+                  if first:
+                      return first
+              return ""
+
+          with open(feedback_file, "w", encoding="utf-8") as f:
+              f.write(f"PR: {owner}/{repo}#{pr_number}\\n")
+              if head_sha:
+                  f.write(f"Head SHA: {head_sha}\\n")
+              if round_start:
+                  f.write(f"Round start: {round_start} (from codex-review marker)\\n")
+              f.write("\\n")
+
+              if trigger_comment is not None:
+                  trigger_id = str(trigger_comment.get("id") or "")
+                  path = trigger_comment.get("path") or ""
+                  line = trigger_comment.get("line") or trigger_comment.get("original_line") or ""
+                  url = trigger_comment.get("html_url") or ""
+                  title = extract_title(trigger_comment.get("body", ""))
+                  body = sanitize_body(trigger_comment.get("body", ""))
+                  f.write("Trigger comment\n")
+                  if path or line:
+                      f.write(f"Location: {path}:{line}\n")
+                  if trigger_id:
+                      f.write(f"Comment id: {trigger_id}\n")
+                  if url:
+                      f.write(f"URL: {url}\n")
+                  if title:
+                      if comment_kind == "review_comment":
+                          f.write(f"Requested fix: {title}\n")
+                      else:
+                          f.write(f"Trigger command: {title}\n")
+                  f.write(body)
+                  f.write("\n\n")
+                  if trigger_id:
+                      codex_comments = [c for c in codex_comments if str(c.get("id") or "") != trigger_id]
+
+              if not codex_comments:
+                  f.write("No Codex inline review comments found for current head/round.\n")
+              for c in codex_comments:
+                  comment_id = str(c.get("id") or "")
+                  path = c.get("path") or ""
+                  line = c.get("line") or c.get("original_line") or ""
+                  url = c.get("html_url") or ""
+                  title = extract_title(c.get("body", ""))
+                  body = sanitize_body(c.get("body", ""))
+                  f.write(f"Comment on {path}:{line}\n")
+                  if comment_id:
+                      f.write(f"Comment id: {comment_id}\n")
+                  if url:
+                      f.write(f"URL: {url}\n")
+                  if title:
+                      f.write(f"Requested fix: {title}\n")
+                  f.write(body)
+                  f.write("\n\n")
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as f:
+              f.write(f"feedback_file={feedback_file}\n")
+          PY
+
+      - name: Resolve Codex session for PR
+        id: session
+        if: steps.pr.outputs.skip_run != 'true'
+        env:
+          REPO: ${{ steps.pr.outputs.repo }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          repo = os.environ.get("REPO", "").strip()
+          pr_number = os.environ.get("PR_NUMBER", "").strip()
+          key = f"{repo}#{pr_number}"
+
+          codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+          state_path = codex_home / "state" / "github_pr_autofix_sessions.json"
+
+          session_id = ""
+          try:
+              data = json.loads(state_path.read_text(encoding="utf-8"))
+              session_id = str(data.get(key) or "")
+          except FileNotFoundError:
+              pass
+          except Exception:
+              session_id = ""
+
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as f:
+              f.write(f"session_id={session_id}\n")
+              f.write(f"session_key={key}\n")
+              f.write(f"session_map={state_path}\n")
+          PY
+
+      - name: Run Codex autofix
+        if: steps.pr.outputs.skip_run != 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          FEEDBACK_FILE: ${{ steps.feedback.outputs.feedback_file }}
+          CODEX_SESSION_KEY: ${{ steps.session.outputs.session_key }}
+          CODEX_SESSION_MAP: ${{ steps.session.outputs.session_map }}
+          CODEX_LOGIN_METHOD: ${{ steps.pr.outputs.codex_login_method }}
+          CODEX_MODEL: ${{ steps.pr.outputs.codex_model }}
+          CODEX_REASONING_EFFORT: ${{ steps.pr.outputs.codex_reasoning_effort }}
+          CODEX_AUTOFIX_ATTEMPT: ${{ steps.pr.outputs.attempt }}
+          CODEX_AUTOFIX_SOURCE: ${{ steps.pr.outputs.source }}
+        run: |
+          set -euo pipefail
+
+          login_method="${CODEX_LOGIN_METHOD:-auto}"
+          if [ "${login_method}" = "chatgpt" ]; then
+            unset OPENAI_API_KEY CODEX_API_KEY
+          elif [ "${login_method}" = "auto" ]; then
+            if [ -z "${OPENAI_API_KEY:-}" ] || [ -z "${CODEX_API_KEY:-}" ]; then
+              unset OPENAI_API_KEY CODEX_API_KEY
+            fi
+          elif [ "${login_method}" = "api" ]; then
+            if [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${CODEX_API_KEY:-}" ]; then
+              echo "ERROR: login_method=api requires secrets.CODEX_API_KEY" >&2
+              exit 2
+            fi
+          fi
+
+          attempt="${CODEX_AUTOFIX_ATTEMPT:-1}"
+          if [ "${attempt}" = "2" ]; then
+            prompt="Read ${FEEDBACK_FILE}. This is attempt=2 after a no-changes result with unresolved high-priority feedback. Treat every P1/P2 as blocking and mandatory. Produce the smallest safe patch that resolves all blocking items on the current head SHA. Do not return without a diff unless a fix is impossible from repository context; if impossible, state exactly why in output. Do not run tests."
+          else
+            prompt="Read ${FEEDBACK_FILE}. Implement every item labeled P0/P1/P2/P3/P4 as required fixes (do not treat them as suggestions). Make the smallest safe code changes that satisfy the feedback. Do not run tests."
+          fi
+
+          echo "Starting Codex session for ${CODEX_SESSION_KEY}"
+          events_file="${RUNNER_TEMP}/codex_events.jsonl"
+          export CODEX_EVENTS_FILE="${events_file}"
+          codex exec -m "${CODEX_MODEL}" -c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"" \
+            --json --dangerously-bypass-approvals-and-sandbox --sandbox danger-full-access \
+            "${prompt}" | tee "${events_file}"
+
+          session_id="$(python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          events_file = Path(os.environ["CODEX_EVENTS_FILE"])
+          session_id = ""
+          for line in events_file.read_text(encoding="utf-8").splitlines():
+              try:
+                  event = json.loads(line)
+              except Exception:
+                  continue
+              event_type = event.get("type")
+              if event_type == "session_meta":
+                  payload = event.get("payload") or {}
+                  session_id = str(payload.get("id") or "")
+              elif event_type == "thread.started":
+                  payload = event.get("payload") or {}
+                  session_id = str(event.get("thread_id") or payload.get("thread_id") or "")
+              if session_id:
+                  break
+
+          print(session_id)
+          PY
+          )"
+
+          export CODEX_SESSION_ID_NEW="${session_id}"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          session_id = os.environ.get("CODEX_SESSION_ID_NEW", "").strip()
+          session_key = os.environ.get("CODEX_SESSION_KEY", "").strip()
+          session_map = Path(os.environ.get("CODEX_SESSION_MAP", "")).expanduser()
+
+          if not session_id or not session_key:
+              print("Could not resolve Codex session id from --json output; skipping session map update.")
+              raise SystemExit(0)
+
+          session_map.parent.mkdir(parents=True, exist_ok=True)
+          try:
+              data = json.loads(session_map.read_text(encoding="utf-8"))
+          except FileNotFoundError:
+              data = {}
+          except Exception:
+              data = {}
+          data[session_key] = session_id
+          session_map.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          print(f"Stored Codex session mapping: {session_key} -> {session_id}")
+          PY
+ 
+          requested_fixes="$(python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          text = Path(os.environ["FEEDBACK_FILE"]).read_text(encoding="utf-8")
+          count = len(re.findall(r"^Requested fix:\s+", text, flags=re.M))
+          if count == 0:
+              count = len(re.findall(r"\bP[0-4]\s+Badge\b", text))
+          print(count)
+          PY
+          )"
+
+          if git diff --quiet && [ "${requested_fixes}" -gt 0 ] && [ -n "${session_id}" ]; then
+            retry_prompt="You produced no git diff, but ${FEEDBACK_FILE} contains required fixes. Apply the fixes now and ensure there is a git diff afterwards. Do not run tests."
+            echo "No diff after first pass; retrying in session ${session_id}"
+            codex exec -m "${CODEX_MODEL}" -c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"" \
+              --dangerously-bypass-approvals-and-sandbox --sandbox danger-full-access \
+              resume "${session_id}" "${retry_prompt}"
+          fi
+
+      - name: Bind PR to Codex session
+        if: always() && steps.pr.outputs.skip_run != 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          REPO: ${{ steps.pr.outputs.repo }}
+          SESSION_MAP: ${{ steps.session.outputs.session_map }}
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            const prNumber = Number(process.env.PR_NUMBER || 0);
+            const repoFull = String(process.env.REPO || '');
+            const sessionMapPath = String(process.env.SESSION_MAP || '');
+            const [owner, repo] = repoFull.split('/', 2);
+            if (!owner || !repo || !prNumber || !sessionMapPath) {
+              core.info('Skip: missing PR context for session binding.');
+              return;
+            }
+
+            const sessionKey = `${owner}/${repo}#${prNumber}`;
+            let sessionId = '';
+            try {
+              const data = JSON.parse(fs.readFileSync(sessionMapPath, 'utf8'));
+              sessionId = String(data[sessionKey] || '');
+            } catch (err) {
+              core.info(`Skip: failed to read session map: ${err}`);
+              return;
+            }
+
+            if (!sessionId) {
+              core.info('Skip: no Codex session id recorded yet.');
+              return;
+            }
+
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            const body = String(pr.data.body || '');
+
+            const sessionMarkerRe = /<!--\s*codex-session:\s*([A-Za-z0-9_-]{1,128})\s*-->/i;
+            const agentMarkerRe = /<!--\s*codex-agent:\s*([A-Za-z0-9_-]{1,128})\s*-->/i;
+            const sessionMarker = `<!-- codex-session: ${sessionId} -->`;
+            const agentMarker = '<!-- codex-agent: selfhosted -->';
+            const markerBlock = `\n\n<!-- codex-session: ${sessionId} -->\n<!-- codex-agent: selfhosted -->\n`;
+            let newBody = body;
+            if (sessionMarkerRe.test(newBody)) {
+              newBody = newBody.replace(sessionMarkerRe, sessionMarker);
+              if (agentMarkerRe.test(newBody)) {
+                newBody = newBody.replace(agentMarkerRe, agentMarker);
+              } else {
+                newBody = newBody.replace(sessionMarker, `${sessionMarker}\n${agentMarker}`);
+              }
+            } else {
+              newBody = body + markerBlock;
+            }
+            if (newBody === body) {
+              core.info(`PR already bound to Codex session ${sessionId}`);
+              return;
+            }
+            try {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: prNumber,
+                body: newBody,
+              });
+              core.info(`Bound PR to Codex session ${sessionId}`);
+            } catch (err) {
+              core.warning(`Failed to update PR body with session marker: ${err}`);
+            }
+
+      - name: Commit and push changes
+        id: commit
+        if: steps.pr.outputs.skip_run != 'true'
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            echo "changes_applied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "Dry-run enabled; skipping commit/push."
+            echo "changes_applied=true" >> "$GITHUB_OUTPUT"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "fix: address codex review feedback"
+          git push origin HEAD:${{ steps.pr.outputs.head_ref }}
+          echo "new_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "changes_applied=true" >> "$GITHUB_OUTPUT"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+        env:
+          DRY_RUN: ${{ steps.pr.outputs.dry_run }}
+
+      - name: Request Codex rereview after autofix push
+        if: steps.pr.outputs.skip_run != 'true' && steps.commit.outputs.changes_applied == 'true' && steps.commit.outputs.pushed == 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          REPO: ${{ steps.pr.outputs.repo }}
+          NEW_SHA: ${{ steps.commit.outputs.new_sha }}
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER || 0);
+            const repoFull = String(process.env.REPO || '');
+            const newSha = String(process.env.NEW_SHA || '').trim();
+            const [owner, repo] = repoFull.split('/', 2);
+            if (!owner || !repo || !prNumber || !newSha) {
+              core.info(`Skip: missing context owner=${owner} repo=${repo} prNumber=${prNumber} newSha=${newSha}`);
+              return;
+            }
+
+            const marker = `<!-- codex-rereview:sha=${newSha} -->`;
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+            const alreadyRequested = comments.some(c => String(c.body || '').includes(marker));
+            if (alreadyRequested) {
+              core.info(`Skip: @codex review already requested for sha ${newSha}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `${marker}\n@codex review`,
+              });
+              core.info(`Requested @codex review for PR #${prNumber} sha=${newSha}`);
+            }
+
+            // Intentionally keep needs-codex-fix until the rereview verdict arrives
+            // (see codex-rereview-on-push.yml). This avoids dropping the only
+            // persistent "unresolved Codex feedback" signal while the rereview is pending.
+
+      - name: Evaluate unresolved high-priority feedback
+        id: unresolved
+        if: steps.pr.outputs.skip_run != 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          REPO: ${{ steps.pr.outputs.repo }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER || 0);
+            const repoFull = String(process.env.REPO || '');
+            const headSha = String(process.env.HEAD_SHA || '').trim();
+            const [owner, repo] = repoFull.split('/', 2);
+            if (!owner || !repo || !prNumber || !headSha) {
+              core.setOutput('p1p2_count', '0');
+              core.info('Skip unresolved check: missing PR context.');
+              return;
+            }
+
+            const query = `
+              query($owner:String!, $repo:String!, $number:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequest(number:$number) {
+                    reviewThreads(first:100) {
+                      nodes {
+                        isResolved
+                        comments(first:50) {
+                          nodes {
+                            body
+                            author { login }
+                            originalCommit { oid }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }`;
+
+            let unresolved = 0;
+            try {
+              const data = await github.graphql(query, { owner, repo, number: prNumber });
+              const threads = data?.repository?.pullRequest?.reviewThreads?.nodes || [];
+              for (const thread of threads) {
+                if (!thread || thread.isResolved) continue;
+                const comments = thread?.comments?.nodes || [];
+                const match = comments.some((c) => {
+                  const author = String(c?.author?.login || '');
+                  const body = String(c?.body || '');
+                  const commit = String(c?.originalCommit?.oid || '');
+                  if (!author.startsWith('chatgpt-codex-connector')) return false;
+                  if (commit !== headSha) return false;
+                  return /\bP[12]\s+Badge\b/i.test(body);
+                });
+                if (match) unresolved += 1;
+              }
+            } catch (err) {
+              core.warning(`Unresolved P1/P2 check failed (non-fatal): ${err}`);
+            }
+            core.info(`unresolved_p1p2_threads=${unresolved}`);
+            core.setOutput('p1p2_count', String(unresolved));
+
+      - name: Guardrail retry when no changes and unresolved P1/P2 remain
+        if: steps.pr.outputs.skip_run != 'true' && job.status == 'success' && steps.commit.outputs.changes_applied == 'false' && steps.pr.outputs.attempt == '1' && steps.pr.outputs.dry_run != 'true' && steps.unresolved.outputs.p1p2_count != '0'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          REPO: ${{ steps.pr.outputs.repo }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          UNRESOLVED_COUNT: ${{ steps.unresolved.outputs.p1p2_count }}
+          RUNNER_LABEL: ${{ steps.pr.outputs.runner_label }}
+          LOGIN_METHOD: ${{ steps.pr.outputs.codex_login_method }}
+          MODEL: ${{ steps.pr.outputs.codex_model }}
+          REASONING_EFFORT: ${{ steps.pr.outputs.codex_reasoning_effort }}
+          COMMENT_ID: ${{ steps.pr.outputs.comment_id }}
+          COMMENT_KIND: ${{ steps.pr.outputs.comment_kind }}
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER || 0);
+            const repoFull = String(process.env.REPO || '');
+            const headSha = String(process.env.HEAD_SHA || '').trim();
+            const unresolvedCount = Number(process.env.UNRESOLVED_COUNT || 0);
+            const runnerLabel = String(process.env.RUNNER_LABEL || '').trim();
+            const loginMethod = String(process.env.LOGIN_METHOD || '').trim();
+            const model = String(process.env.MODEL || '').trim();
+            const reasoningEffort = String(process.env.REASONING_EFFORT || '').trim();
+            const commentId = String(process.env.COMMENT_ID || '').trim();
+            const commentKind = String(process.env.COMMENT_KIND || '').trim();
+            const [owner, repo] = repoFull.split('/', 2);
+            if (!owner || !repo || !prNumber || !headSha || unresolvedCount <= 0) {
+              core.info('Skip guardrail retry: missing context or unresolved count is zero.');
+              return;
+            }
+
+            const retryMarker = `<!-- codex-autofix:retry sha=${headSha} attempt=2 reason=no-changes-unresolved-p1p2 -->`;
+            const issueComments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+            const alreadyRetried = issueComments.some(c => String(c.body || '').includes(retryMarker));
+            if (alreadyRetried) {
+              core.info(`Skip guardrail retry: marker already exists for sha=${headSha}.`);
+              return;
+            }
+
+            const retryComment = await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body:
+                `${retryMarker}\n` +
+                `Retrying autofix with stricter prompt because unresolved P1/P2 feedback remains after no-changes.\n\n` +
+                `sha=${headSha}\n` +
+                `unresolved_p1p2_threads=${unresolvedCount}\n` +
+                `source=guardrail-no-changes`,
+            });
+            const retryCommentId = retryComment?.data?.id || null;
+
+            let batchDispatched = false;
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'codex-autofix-dispatch-batched.yml',
+                ref: 'main',
+                inputs: {
+                  pr_number: String(prNumber),
+                  repo: `${owner}/${repo}`,
+                  sha: headSha,
+                  source: 'guardrail-no-changes',
+                  attempt: '2',
+                  batch_window_seconds: '0',
+                  runner_label: runnerLabel,
+                  login_method: loginMethod,
+                  model,
+                  reasoning_effort: reasoningEffort,
+                  comment_id: commentId,
+                  comment_kind: commentKind,
+                },
+              });
+              batchDispatched = true;
+            } catch (batchErr) {
+              core.warning(`Guardrail batch dispatch failed: ${batchErr}`);
+            }
+
+            if (batchDispatched) {
+              core.info(`Guardrail retry dispatched via batcher for pr=${prNumber} sha=${headSha}`);
+              return;
+            }
+
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'codex-autofix-selfhosted.yml',
+                ref: 'main',
+                inputs: {
+                  pr_number: String(prNumber),
+                  repo: `${owner}/${repo}`,
+                  runner_label: runnerLabel,
+                  login_method: loginMethod,
+                  model,
+                  reasoning_effort: reasoningEffort,
+                  comment_id: commentId,
+                  comment_kind: commentKind,
+                  target_sha: headSha,
+                  attempt: '2',
+                  source: 'guardrail-no-changes',
+                },
+              });
+              core.info(`Guardrail retry dispatched via direct fallback for pr=${prNumber} sha=${headSha}`);
+            } catch (directErr) {
+              core.warning(`Guardrail direct fallback dispatch failed: ${directErr}`);
+              if (retryCommentId) {
+                try {
+                  await github.rest.issues.deleteComment({
+                    owner,
+                    repo,
+                    comment_id: retryCommentId,
+                  });
+                } catch (deleteErr) {
+                  core.warning(`Guardrail retry marker rollback failed for comment=${retryCommentId}: ${deleteErr}`);
+                }
+              }
+            }
+
+      - name: Report result on PR
+        if: always() && steps.pr.outputs.skip_run != 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          REPO: ${{ steps.pr.outputs.repo }}
+          JOB_STATUS: ${{ job.status }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          RUNNER_LABEL: ${{ steps.pr.outputs.runner_label }}
+          DRY_RUN: ${{ steps.pr.outputs.dry_run }}
+          CODEX_LOGIN_METHOD: ${{ steps.pr.outputs.codex_login_method }}
+          CODEX_MODEL: ${{ steps.pr.outputs.codex_model }}
+          CODEX_REASONING_EFFORT: ${{ steps.pr.outputs.codex_reasoning_effort }}
+          ATTEMPT: ${{ steps.pr.outputs.attempt }}
+          SOURCE: ${{ steps.pr.outputs.source }}
+          CHANGES_APPLIED: ${{ steps.commit.outputs.changes_applied || 'false' }}
+          PUSHED: ${{ steps.commit.outputs.pushed || 'false' }}
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER || 0);
+            const repoFull = String(process.env.REPO || '');
+            const [owner, repo] = repoFull.split('/', 2);
+            if (!owner || !repo || !prNumber) {
+              core.info('Skip: missing PR context');
+              return;
+            }
+
+            const sha = String(process.env.HEAD_SHA || '').slice(0, 12);
+            const runnerLabel = String(process.env.RUNNER_LABEL || '').trim();
+            const dryRun = String(process.env.DRY_RUN || '').toLowerCase() === 'true';
+            const loginMethod = String(process.env.CODEX_LOGIN_METHOD || '').trim();
+            const model = String(process.env.CODEX_MODEL || '').trim();
+            const reasoningEffort = String(process.env.CODEX_REASONING_EFFORT || '').trim();
+            const attempt = String(process.env.ATTEMPT || '1').trim();
+            const source = String(process.env.SOURCE || '').trim();
+            const changesApplied = String(process.env.CHANGES_APPLIED || '') === 'true';
+            const pushed = String(process.env.PUSHED || '') === 'true';
+
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const status = String(process.env.JOB_STATUS || '').trim() || 'unknown';
+
+            let headline;
+            if (status === 'success') {
+              if (!changesApplied) {
+                headline = 'Autofix finished: no changes.';
+              } else if (dryRun || !pushed) {
+                headline = 'Autofix finished (dry-run): changes computed, not pushed.';
+              } else {
+                headline = 'Autofix finished: fixes pushed.';
+              }
+            } else {
+              headline = `Autofix failed (${status}).`;
+            }
+
+            const meta = [];
+            if (sha) meta.push(`sha=${sha}`);
+            if (loginMethod) meta.push(`login=${loginMethod}`);
+            if (model) meta.push(`model=${model}`);
+            if (reasoningEffort) meta.push(`reasoning_effort=${reasoningEffort}`);
+            if (attempt) meta.push(`attempt=${attempt}`);
+            if (source) meta.push(`source=${source}`);
+            if (runnerLabel) meta.push(`runner=${runnerLabel}`);
+            if (dryRun) meta.push('dry_run=true');
+            meta.push(`run=${runUrl}`);
+
+            const body = `<!-- codex-autofix:result sha=${sha} status=${status} -->\n${headline}\n\n${meta.join('\n')}`;
+            await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });

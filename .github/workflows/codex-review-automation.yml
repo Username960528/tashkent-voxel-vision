@@ -1,0 +1,551 @@
+name: codex-review-automation
+
+on:
+  pull_request_review_comment:
+    types: [created]
+  pull_request_target:
+    types: [labeled, opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  label_codex_feedback:
+    if: github.event_name == 'pull_request_review_comment'
+    concurrency:
+      group: codex-review-automation-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CODEX_REVIEW_TOKEN
+        id: token
+        run: |
+          if [ -z "${CODEX_REVIEW_TOKEN}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
+
+      - name: Label PR when Codex leaves inline feedback (PAT)
+        if: steps.token.outputs.present == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN }}
+          script: |
+            const author = context.payload?.comment?.user?.login;
+            if (!author || !author.startsWith('chatgpt-codex-connector')) {
+              core.info(`Skip: comment author=${author}`);
+              return;
+            }
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = context.payload.pull_request.number;
+
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            const labels = (pr.data.labels || []).map(l => l.name);
+
+            const toAdd = [];
+            if (!labels.includes('needs-codex-fix')) {
+              toAdd.push('needs-codex-fix');
+            }
+
+            const autofixAllowed =
+              !pr.data.draft &&
+              pr.data.head?.repo?.full_name === `${owner}/${repo}` &&
+              !labels.includes('automation/off') &&
+              !labels.includes('no-bot') &&
+              !labels.includes('autofix/off');
+            if (autofixAllowed && !labels.includes('autofix/codex')) {
+              toAdd.push('autofix/codex');
+            }
+
+            if (toAdd.length === 0) {
+              core.info(`No labels to add on PR #${prNumber}`);
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: prNumber,
+              labels: toAdd,
+            });
+            core.info(`Added labels ${toAdd.join(', ')} to PR #${prNumber}`);
+
+      - name: Label PR when Codex leaves inline feedback (GITHUB_TOKEN)
+        if: steps.token.outputs.present != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const author = context.payload?.comment?.user?.login;
+            if (!author || !author.startsWith('chatgpt-codex-connector')) {
+              core.info(`Skip: comment author=${author}`);
+              return;
+            }
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = context.payload.pull_request.number;
+
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            const labels = (pr.data.labels || []).map(l => l.name);
+
+            const toAdd = [];
+            if (!labels.includes('needs-codex-fix')) {
+              toAdd.push('needs-codex-fix');
+            }
+
+            const autofixAllowed =
+              !pr.data.draft &&
+              pr.data.head?.repo?.full_name === `${owner}/${repo}` &&
+              !labels.includes('automation/off') &&
+              !labels.includes('no-bot') &&
+              !labels.includes('autofix/off');
+            if (autofixAllowed && !labels.includes('autofix/codex')) {
+              toAdd.push('autofix/codex');
+            }
+
+            if (toAdd.length === 0) {
+              core.info(`No labels to add on PR #${prNumber}`);
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: prNumber,
+              labels: toAdd,
+            });
+            core.info(`Added labels ${toAdd.join(', ')} to PR #${prNumber}`);
+
+      - name: Dispatch autofix when Codex feedback arrives and autofix/codex is set
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || github.token }}
+          script: |
+            const author = context.payload?.comment?.user?.login;
+            if (!author || !author.startsWith('chatgpt-codex-connector')) {
+              core.info(`Skip: comment author=${author}`);
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = context.payload.pull_request.number;
+
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            const isRetryable = (err) => {
+              const status = err?.status ?? err?.response?.status;
+              if (!status) return true;
+              return status === 429 || status >= 500;
+            };
+            const withRetry = async (name, fn, retries = 3) => {
+              let attempt = 0;
+              while (true) {
+                try {
+                  return await fn();
+                } catch (err) {
+                  attempt += 1;
+                  if (!isRetryable(err) || attempt > retries) {
+                    throw err;
+                  }
+                  const backoff = 500 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 200);
+                  core.info(`Retryable error in ${name} (attempt ${attempt}/${retries}): ${err}`);
+                  await sleep(backoff);
+                }
+              }
+            };
+
+            // Event payload labels can be stale if we add labels earlier in this job.
+            const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            const labels = (pr.data.labels || []).map(l => l.name);
+
+            if (labels.includes('automation/off') || labels.includes('no-bot') || labels.includes('autofix/off')) {
+              core.info('automation/off, no-bot, or autofix/off present; skipping.');
+              return;
+            }
+
+            if (pr.data.draft) {
+              core.info('PR is draft; skipping.');
+              return;
+            }
+
+            if (pr.data.head?.repo?.full_name !== `${owner}/${repo}`) {
+              core.info('PR is from a fork; skipping.');
+              return;
+            }
+
+            // Ensure labels are present before dispatch (handles transient API delays/failures earlier in the job).
+            const toAdd = [];
+            if (!labels.includes('needs-codex-fix')) {
+              toAdd.push('needs-codex-fix');
+            }
+            if (!labels.includes('autofix/codex')) {
+              toAdd.push('autofix/codex');
+            }
+            if (toAdd.length > 0) {
+              try {
+                await withRetry('issues.addLabels', () =>
+                  github.rest.issues.addLabels({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    labels: toAdd,
+                  })
+                );
+                core.info(`Added labels ${toAdd.join(', ')} to PR #${prNumber} before dispatch.`);
+              } catch (err) {
+                core.setFailed(`Autofix not dispatched: failed to add labels before dispatch: ${err}`);
+                return;
+              }
+            }
+
+            const sha = pr.data.head?.sha;
+            const prBody = String(pr.data.body || '');
+            // Markers must be on their own line to avoid accidental matches in docs/backticks.
+            const runnerMarkerRe = /(?:^|\n)[ \t]*<!--[ \t]*codex-runner:[ \t]*([A-Za-z0-9_-]{1,64})[ \t]*-->[ \t]*(?:\n|$)/i;
+            const dryRunMarkerRe = /(?:^|\n)[ \t]*<!--[ \t]*codex-autofix:dry-run[ \t]*(?:=[ \t]*(?:true|1|yes|y))?[ \t]*-->[ \t]*(?:\n|$)/i;
+            const runnerMatch = prBody.match(runnerMarkerRe);
+            const runnerLabel = runnerMatch ? runnerMatch[1] : '';
+            const dryRun = dryRunMarkerRe.test(prBody);
+            const triggerCommentId = context.payload?.comment?.id;
+            const triggerCommentUrl = context.payload?.comment?.html_url;
+
+            const markerRe = /<!--\s*codex-autofix:sha=([0-9a-f]{7,40})\s*-->/i;
+            const toMs = (value) => {
+              const ms = Date.parse(String(value || ''));
+              return Number.isFinite(ms) ? ms : 0;
+            };
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+            const triggerCommentTag = triggerCommentId ? `trigger_comment_id=${triggerCommentId}` : '';
+            let latestMarkerMs = 0;
+            for (let i = comments.length - 1; i >= 0; i--) {
+              const body = String(comments[i].body || '');
+              const m = body.match(markerRe);
+              if (!m) continue;
+              const lastSha = m[1];
+              if (lastSha !== sha) continue;
+              latestMarkerMs = Math.max(latestMarkerMs, toMs(comments[i]?.created_at));
+              if (triggerCommentTag && body.includes(triggerCommentTag)) {
+                core.info(`Already dispatched autofix for sha ${sha} and comment_id ${triggerCommentId}; skipping.`);
+                return;
+              }
+            }
+            if (latestMarkerMs > 0) {
+              const cooldownMs = 180 * 1000;
+              const ageMs = Date.now() - latestMarkerMs;
+              if (ageMs < cooldownMs) {
+                core.info(
+                  `Recently dispatched autofix for sha ${sha} (${ageMs}ms ago); skipping duplicate dispatch.`
+                );
+                return;
+              }
+            }
+
+            try {
+              await withRetry('actions.createWorkflowDispatch(batched)', () => github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'codex-autofix-dispatch-batched.yml',
+                ref: pr.data.base?.ref || 'main',
+                inputs: {
+                  pr_number: String(prNumber),
+                  repo: `${owner}/${repo}`,
+                  sha: sha,
+                  source: 'review-comment',
+                  attempt: '1',
+                  batch_window_seconds: '90',
+                  runner_label: runnerLabel,
+                  dry_run: dryRun ? 'true' : '',
+                  comment_id: triggerCommentId ? String(triggerCommentId) : '',
+                  comment_kind: 'review_comment',
+                },
+              }));
+              core.info(`Dispatched batched autofix workflow for PR #${prNumber}`);
+              return;
+            } catch (batchError) {
+              core.warning(`Batched dispatch failed; falling back to direct dispatch: ${batchError}`);
+            }
+
+            const markerMeta = [
+              'source=review-comment',
+              'attempt=1',
+              runnerLabel ? `runner=${runnerLabel}` : '',
+              dryRun ? 'dry_run=true' : '',
+              triggerCommentTag,
+              triggerCommentUrl ? `trigger_comment=${triggerCommentUrl}` : '',
+            ].filter(Boolean).join('\n');
+            const markerBody = `<!-- codex-autofix:sha=${sha} -->\nDispatching autofix for ${sha}` +
+              (markerMeta ? `\n\n${markerMeta}` : '');
+
+            let markerCommentId;
+            try {
+              const markerComment = await withRetry('issues.createComment', () => github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: markerBody,
+              }));
+              markerCommentId = markerComment?.data?.id;
+            } catch (error) {
+              core.setFailed(
+                `Autofix not dispatched for sha ${sha}: failed to write marker comment: ${error}`
+              );
+              return;
+            }
+
+            try {
+              await withRetry('actions.createWorkflowDispatch', () => github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'codex-autofix-selfhosted.yml',
+                ref: 'main',
+                inputs: {
+                  pr_number: String(prNumber),
+                  repo: `${owner}/${repo}`,
+                  runner_label: runnerLabel,
+                  dry_run: dryRun ? 'true' : '',
+                  comment_id: triggerCommentId ? String(triggerCommentId) : '',
+                  comment_kind: 'review_comment',
+                  target_sha: sha,
+                  attempt: '1',
+                  source: 'review-comment',
+                },
+              }));
+            } catch (error) {
+              core.setFailed(`Failed to dispatch autofix for sha ${sha}: ${error}`);
+              if (markerCommentId) {
+                try {
+                  await github.rest.issues.deleteComment({
+                    owner,
+                    repo,
+                    comment_id: markerCommentId,
+                  });
+                } catch (deleteError) {
+                  core.info(
+                    `Failed to delete marker comment ${markerCommentId} after dispatch error: ${deleteError}`
+                  );
+                }
+              }
+              return;
+            }
+            core.info(`Dispatched autofix workflow for PR #${prNumber}`);
+
+  auto_autofix_on_needs:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CODEX_REVIEW_TOKEN
+        id: token
+        run: |
+          if [ -z "${CODEX_REVIEW_TOKEN}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
+
+      - name: Auto-add autofix/codex when needs-codex-fix is labeled
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || github.token }}
+          script: |
+            const action = context.payload.action;
+            if (action !== 'labeled') {
+              core.info(`Skip: action=${action}`);
+              return;
+            }
+
+            const label = context.payload.label?.name;
+            if (label !== 'needs-codex-fix') {
+              core.info(`Skip: label=${label}`);
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.info('Skip: label is not on a PR');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = pr.number;
+            const labels = (pr.labels || []).map(l => l.name);
+
+            if (pr.draft) {
+              core.info('PR is draft; skipping.');
+              return;
+            }
+
+            if (labels.includes('automation/off') || labels.includes('no-bot') || labels.includes('autofix/off')) {
+              core.info('automation/off, no-bot, or autofix/off present; skipping.');
+              return;
+            }
+
+            if (pr.head?.repo?.full_name !== `${owner}/${repo}`) {
+              core.info('PR is from a fork; skipping.');
+              return;
+            }
+
+            if (labels.includes('autofix/codex')) {
+              core.info('autofix/codex already present; skipping.');
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: prNumber,
+              labels: ['autofix/codex'],
+            });
+            core.info(`Added autofix/codex to PR #${prNumber}`);
+
+  request_codex_review:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CODEX_REVIEW_TOKEN
+        id: token
+        run: |
+          if [ -z "${CODEX_REVIEW_TOKEN}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
+
+      - name: Comment @codex review on open/sync
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || github.token }}
+          script: |
+            const action = context.payload.action;
+            const allowed = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review']);
+            if (!allowed.has(action)) {
+              core.info(`Skip: action=${action}`);
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.info('Skip: not a PR event');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = pr.number;
+            const sha = pr.head?.sha;
+            const labels = (pr.labels || []).map(l => l.name);
+
+            if (pr.draft) {
+              core.info('PR is draft; skipping.');
+              return;
+            }
+
+            if (labels.includes('automation/off') || labels.includes('no-bot')) {
+              core.info('automation/off or no-bot present; skipping.');
+              return;
+            }
+
+            if (labels.includes('needs-codex-fix')) {
+              core.info('needs-codex-fix present; rereview flow will handle it.');
+              return;
+            }
+
+            if (pr.head?.repo?.full_name !== `${owner}/${repo}`) {
+              core.info('PR is from a fork; skipping.');
+              return;
+            }
+
+            const markerRe = /<!--\s*codex-review:sha=([0-9a-f]{7,40})\s*-->/i;
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+            for (let i = comments.length - 1; i >= 0; i--) {
+              const body = comments[i].body || '';
+              const m = body.match(markerRe);
+              if (m) {
+                const lastSha = m[1];
+                if (lastSha === sha) {
+                  core.info(`Already requested @codex review for sha ${sha}; skipping.`);
+                  return;
+                }
+                break;
+              }
+            }
+
+            const body = `<!-- codex-review:sha=${sha} -->\n@codex review`;
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body
+            });
+            core.info(`Posted @codex review request for PR #${prNumber}`);
+
+  trigger_codex_autofix:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CODEX_REVIEW_TOKEN
+        id: token
+        run: |
+          if [ -z "${CODEX_REVIEW_TOKEN}" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
+
+      - name: Comment @codex address that feedback when autofix/remote is added
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || github.token }}
+          script: |
+            const label = context.payload.label?.name;
+            if (label !== 'autofix/remote') {
+              core.info(`Skip: label=${label}`);
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.info('Skip: label is not on a PR');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = pr.number;
+            const labels = (pr.labels || []).map(l => l.name);
+
+            if (labels.includes('automation/off') || labels.includes('no-bot')) {
+              core.info('automation/off or no-bot present; skipping.');
+              return;
+            }
+
+            if (pr.head?.repo?.full_name !== `${owner}/${repo}`) {
+              core.info('PR is from a fork; skipping.');
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body: '@codex address that feedback',
+            });
+            core.info(`Requested Codex autofix on PR #${prNumber}`);

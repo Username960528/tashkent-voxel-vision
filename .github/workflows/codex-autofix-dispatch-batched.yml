@@ -1,0 +1,346 @@
+name: codex-autofix-dispatch-batched
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number"
+        required: true
+      repo:
+        description: "owner/repo (defaults to current)"
+        required: false
+      sha:
+        description: "Target PR head SHA to dispatch against"
+        required: true
+      source:
+        description: "Dispatch source"
+        required: false
+      runner_label:
+        description: "Optional self-hosted runner label"
+        required: false
+      dry_run:
+        description: "If true, do not push changes (report only)"
+        required: false
+      login_method:
+        description: "Codex auth override: chatgpt|api|auto"
+        required: false
+      model:
+        description: "Optional Codex model override"
+        required: false
+      reasoning_effort:
+        description: "Optional reasoning effort override"
+        required: false
+      comment_id:
+        description: "Optional triggering comment id"
+        required: false
+      comment_kind:
+        description: "Optional triggering comment kind: review_comment|issue_comment"
+        required: false
+      attempt:
+        description: "Dispatch attempt number (1..2)"
+        required: false
+      batch_window_seconds:
+        description: "Debounce window for attempt=1"
+        required: false
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: codex-autofix-batch-${{ inputs.pr_number }}-${{ inputs.sha }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve inputs
+        id: ctx
+        env:
+          REPO_INPUT: ${{ inputs.repo }}
+          DEFAULT_REPO: ${{ github.repository }}
+          PR_NUMBER_INPUT: ${{ inputs.pr_number }}
+          SHA_INPUT: ${{ inputs.sha }}
+          SOURCE_INPUT: ${{ inputs.source }}
+          RUNNER_LABEL_INPUT: ${{ inputs.runner_label }}
+          DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          LOGIN_METHOD_INPUT: ${{ inputs.login_method }}
+          MODEL_INPUT: ${{ inputs.model }}
+          REASONING_EFFORT_INPUT: ${{ inputs.reasoning_effort }}
+          COMMENT_ID_INPUT: ${{ inputs.comment_id }}
+          COMMENT_KIND_INPUT: ${{ inputs.comment_kind }}
+          ATTEMPT_INPUT: ${{ inputs.attempt }}
+          BATCH_WINDOW_INPUT: ${{ inputs.batch_window_seconds }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+
+          repo = (os.environ.get("REPO_INPUT") or "").strip() or (os.environ.get("DEFAULT_REPO") or "").strip()
+          if "/" not in repo:
+              raise SystemExit("repo must be owner/repo")
+          owner, repo_name = repo.split("/", 1)
+
+          pr_number = (os.environ.get("PR_NUMBER_INPUT") or "").strip()
+          if not re.fullmatch(r"\d{1,10}", pr_number):
+              raise SystemExit("pr_number must be numeric")
+
+          sha = (os.environ.get("SHA_INPUT") or "").strip().lower()
+          if not re.fullmatch(r"[0-9a-f]{7,40}", sha):
+              raise SystemExit("sha must match [0-9a-f]{7,40}")
+
+          source = (os.environ.get("SOURCE_INPUT") or "").strip().lower() or "unknown"
+          allowed_sources = {
+              "review-comment",
+              "cron-fallback",
+              "quota-fallback-review",
+              "on-command",
+              "session-dispatch",
+              "guardrail-no-changes",
+              "watchdog-stale-run",
+              "unknown",
+          }
+          if source not in allowed_sources:
+              raise SystemExit("invalid source")
+
+          attempt_raw = (os.environ.get("ATTEMPT_INPUT") or "").strip() or "1"
+          if not re.fullmatch(r"\d{1,2}", attempt_raw):
+              raise SystemExit("attempt must be numeric")
+          attempt = int(attempt_raw)
+          if attempt < 1 or attempt > 2:
+              raise SystemExit("attempt must be 1..2")
+
+          batch_window_raw = (os.environ.get("BATCH_WINDOW_INPUT") or "").strip() or "90"
+          if not re.fullmatch(r"\d{1,4}", batch_window_raw):
+              raise SystemExit("batch_window_seconds must be numeric")
+          batch_window_seconds = int(batch_window_raw)
+          if batch_window_seconds < 0 or batch_window_seconds > 900:
+              raise SystemExit("batch_window_seconds must be 0..900")
+
+          runner_label = (os.environ.get("RUNNER_LABEL_INPUT") or "").strip()
+          if runner_label and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", runner_label):
+              raise SystemExit("invalid runner_label")
+
+          dry_run_raw = (os.environ.get("DRY_RUN_INPUT") or "").strip().lower()
+          dry_run = dry_run_raw in {"1", "true", "yes", "y"}
+
+          login_method = (os.environ.get("LOGIN_METHOD_INPUT") or "").strip().lower()
+          if login_method and login_method not in {"chatgpt", "api", "auto"}:
+              raise SystemExit("invalid login_method")
+
+          model = (os.environ.get("MODEL_INPUT") or "").strip()
+          if model and not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", model):
+              raise SystemExit("invalid model")
+
+          reasoning_effort = (os.environ.get("REASONING_EFFORT_INPUT") or "").strip().lower()
+          if reasoning_effort and not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", reasoning_effort):
+              raise SystemExit("invalid reasoning_effort")
+
+          comment_id = (os.environ.get("COMMENT_ID_INPUT") or "").strip()
+          if comment_id and not re.fullmatch(r"\d{1,32}", comment_id):
+              raise SystemExit("invalid comment_id")
+
+          comment_kind = (os.environ.get("COMMENT_KIND_INPUT") or "").strip()
+          if comment_kind and comment_kind not in {"review_comment", "issue_comment"}:
+              raise SystemExit("invalid comment_kind")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"owner={owner}\n")
+              f.write(f"repo_name={repo_name}\n")
+              f.write(f"repo_full={owner}/{repo_name}\n")
+              f.write(f"pr_number={pr_number}\n")
+              f.write(f"sha={sha}\n")
+              f.write(f"source={source}\n")
+              f.write(f"attempt={attempt}\n")
+              f.write(f"batch_window_seconds={batch_window_seconds}\n")
+              f.write(f"runner_label={runner_label}\n")
+              f.write(f"dry_run={'true' if dry_run else 'false'}\n")
+              f.write(f"login_method={login_method}\n")
+              f.write(f"model={model}\n")
+              f.write(f"reasoning_effort={reasoning_effort}\n")
+              f.write(f"comment_id={comment_id}\n")
+              f.write(f"comment_kind={comment_kind}\n")
+          PY
+
+      - name: Debounce batch window
+        if: steps.ctx.outputs.attempt == '1' && steps.ctx.outputs.batch_window_seconds != '0'
+        run: sleep "${{ steps.ctx.outputs.batch_window_seconds }}"
+
+      - name: Dispatch autofix run (batched)
+        uses: actions/github-script@v7
+        env:
+          OWNER: ${{ steps.ctx.outputs.owner }}
+          REPO_NAME: ${{ steps.ctx.outputs.repo_name }}
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
+          SHA: ${{ steps.ctx.outputs.sha }}
+          SOURCE: ${{ steps.ctx.outputs.source }}
+          ATTEMPT: ${{ steps.ctx.outputs.attempt }}
+          RUNNER_LABEL: ${{ steps.ctx.outputs.runner_label }}
+          DRY_RUN: ${{ steps.ctx.outputs.dry_run }}
+          LOGIN_METHOD: ${{ steps.ctx.outputs.login_method }}
+          MODEL: ${{ steps.ctx.outputs.model }}
+          REASONING_EFFORT: ${{ steps.ctx.outputs.reasoning_effort }}
+          COMMENT_ID: ${{ steps.ctx.outputs.comment_id }}
+          COMMENT_KIND: ${{ steps.ctx.outputs.comment_kind }}
+        with:
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = String(process.env.OWNER || '').trim();
+            const repo = String(process.env.REPO_NAME || '').trim();
+            const prNumber = Number(process.env.PR_NUMBER || 0);
+            const targetSha = String(process.env.SHA || '').trim();
+            const source = String(process.env.SOURCE || '').trim();
+            const attempt = String(process.env.ATTEMPT || '1').trim();
+            const runnerLabel = String(process.env.RUNNER_LABEL || '').trim();
+            const dryRun = String(process.env.DRY_RUN || '').trim() === 'true';
+            const loginMethod = String(process.env.LOGIN_METHOD || '').trim();
+            const model = String(process.env.MODEL || '').trim();
+            const reasoningEffort = String(process.env.REASONING_EFFORT || '').trim();
+            const commentId = String(process.env.COMMENT_ID || '').trim();
+            const commentKind = String(process.env.COMMENT_KIND || '').trim();
+
+            if (!owner || !repo || !prNumber || !targetSha) {
+              core.setFailed('Missing required context for batched dispatch.');
+              return;
+            }
+
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            const isRetryable = (err) => {
+              const status = err?.status ?? err?.response?.status;
+              if (!status) return true;
+              return status === 429 || status >= 500;
+            };
+            const withRetry = async (name, fn, retries = 3) => {
+              let tries = 0;
+              while (true) {
+                try {
+                  return await fn();
+                } catch (err) {
+                  tries += 1;
+                  if (!isRetryable(err) || tries > retries) {
+                    throw err;
+                  }
+                  const backoff = 500 * (2 ** (tries - 1)) + Math.floor(Math.random() * 200);
+                  core.info(`Retryable error in ${name} (attempt ${tries}/${retries}): ${err}`);
+                  await sleep(backoff);
+                }
+              }
+            };
+
+            const pr = await withRetry('pulls.get', () =>
+              github.rest.pulls.get({ owner, repo, pull_number: prNumber })
+            );
+            if (String(pr.data.state || '').toLowerCase() !== 'open') {
+              core.info(`Skip: PR #${prNumber} is not open.`);
+              return;
+            }
+
+            const headSha = String(pr.data.head?.sha || '').trim();
+            if (headSha !== targetSha) {
+              core.info(`Skip stale batch trigger: target_sha=${targetSha} head_sha=${headSha}`);
+              return;
+            }
+
+            const labels = (pr.data.labels || []).map(l => l.name);
+            if (labels.includes('automation/off') || labels.includes('no-bot') || labels.includes('autofix/off')) {
+              core.info('Skip: automation/off, no-bot, or autofix/off present.');
+              return;
+            }
+            if (pr.data.draft) {
+              core.info('Skip: PR is draft.');
+              return;
+            }
+            if (pr.data.head?.repo?.full_name !== `${owner}/${repo}`) {
+              core.info('Skip: PR is from fork.');
+              return;
+            }
+
+            const toAdd = [];
+            if (!labels.includes('needs-codex-fix')) toAdd.push('needs-codex-fix');
+            if (!labels.includes('autofix/codex')) toAdd.push('autofix/codex');
+            if (toAdd.length > 0) {
+              await withRetry('issues.addLabels', () =>
+                github.rest.issues.addLabels({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  labels: toAdd,
+                })
+              );
+            }
+
+            const issueComments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+            const markerRe = /<!--\s*codex-autofix:sha=([0-9a-f]{7,40})\s*-->/i;
+            const markerSourceTag = `source=${source}`;
+            const markerAttemptTag = `attempt=${attempt}`;
+            const triggerCommentTag = commentId ? `trigger_comment_id=${commentId}` : '';
+            const now = Date.now();
+            const dedupeWindowMs = 30 * 60 * 1000;
+            for (let i = issueComments.length - 1; i >= 0; i--) {
+              const body = String(issueComments[i]?.body || '');
+              const m = body.match(markerRe);
+              if (!m || m[1] !== targetSha) continue;
+              const created = Date.parse(String(issueComments[i]?.created_at || ''));
+              if (Number.isFinite(created) && now - created > dedupeWindowMs) continue;
+              if (!body.includes(markerSourceTag) || !body.includes(markerAttemptTag)) continue;
+              if (triggerCommentTag && !body.includes(triggerCommentTag)) continue;
+              core.info(`Skip: matching recent marker already exists for sha=${targetSha} source=${source} attempt=${attempt}.`);
+              return;
+            }
+
+            const markerMeta = [
+              `source=${source}`,
+              `attempt=${attempt}`,
+              runnerLabel ? `runner=${runnerLabel}` : '',
+              dryRun ? 'dry_run=true' : '',
+              triggerCommentTag,
+              commentKind ? `trigger_comment_kind=${commentKind}` : '',
+              'dispatched_by=batched-dispatch',
+            ].filter(Boolean).join('\n');
+            const markerBody =
+              `<!-- codex-autofix:sha=${targetSha} -->\nDispatching autofix for ${targetSha}` +
+              (markerMeta ? `\n\n${markerMeta}` : '');
+
+            await withRetry('actions.createWorkflowDispatch', () =>
+              github.rest.actions.createWorkflowDispatch({
+                owner,
+                repo,
+                workflow_id: 'codex-autofix-selfhosted.yml',
+                ref: pr.data.base?.ref || 'main',
+                inputs: {
+                  pr_number: String(prNumber),
+                  repo: `${owner}/${repo}`,
+                  runner_label: runnerLabel,
+                  dry_run: dryRun ? 'true' : '',
+                  login_method: loginMethod,
+                  model,
+                  reasoning_effort: reasoningEffort,
+                  comment_id: commentId,
+                  comment_kind: commentKind,
+                  target_sha: targetSha,
+                  attempt: attempt,
+                  source: source,
+                },
+              })
+            );
+
+            try {
+              await withRetry('issues.createComment', () =>
+                github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  body: markerBody,
+                })
+              );
+            } catch (err) {
+              core.warning(`Non-fatal: dispatch succeeded but marker comment failed for sha=${targetSha}: ${err}`);
+            }
+
+            core.info(`Dispatched codex-autofix-selfhosted via batcher for PR #${prNumber} sha=${targetSha} source=${source} attempt=${attempt}`);
