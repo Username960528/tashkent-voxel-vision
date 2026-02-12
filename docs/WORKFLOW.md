@@ -53,6 +53,22 @@ flowchart LR
 
 ## Review Automation
 
+### Setup Checklist (required)
+
+Before expecting fully automatic review+autofix, verify:
+
+- **Codex connector**: connect this GitHub repo in Codex settings, otherwise bot replies with "create a Codex account and connect to github".
+- **Self-hosted runner**: at least one online runner with labels `self-hosted` and `codex`.
+- **Secrets**:
+  - `CODEX_REVIEW_TOKEN` (recommended) for comment/dispatch operations as connected user.
+  - `CODEX_API_KEY` only if you use API auth mode instead of ChatGPT login.
+  - `CODEX_SESSION_DISPATCH_URL` (+ optional `CODEX_SESSION_DISPATCH_TOKEN`) only if you use webhook relay.
+- **Labels**: ensure `needs-codex-fix` and `autofix/codex` exist in the repo.
+
+Notes:
+- If `CODEX_REVIEW_TOKEN` is absent or under-scoped, workflows use `GITHUB_TOKEN` fallback where possible.
+- `codex-autofix-watchdog` is fail-open for PR-comment write errors: it still cancels stale runs and continues retry flow.
+
 ### Codex Review
 
 - On PR open/reopened/ready_for_review/synchronize (non-draft, non-fork), a workflow posts `@codex review` automatically.

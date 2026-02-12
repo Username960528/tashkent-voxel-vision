@@ -22,6 +22,7 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const safeString = (value) => String(value || '');
 
             const queuedLimitMs = 3 * 60 * 1000;
             const inProgressLimitMs = 10 * 60 * 1000;
@@ -96,10 +97,17 @@ jobs:
                 continue;
               }
 
-              const issueComments = await github.paginate(
-                github.rest.issues.listComments,
-                { owner, repo, issue_number: stale.prNumber, per_page: 100 }
-              );
+              let issueComments = [];
+              try {
+                issueComments = await github.paginate(
+                  github.rest.issues.listComments,
+                  { owner, repo, issue_number: stale.prNumber, per_page: 100 }
+                );
+              } catch (listErr) {
+                core.warning(
+                  `Watchdog: failed to list PR comments for #${stale.prNumber}; continuing without marker dedupe: ${listErr}`
+                );
+              }
               const retryMarker = `<!-- codex-autofix:watchdog-retry sha=${stale.sha} attempt=2 -->`;
 
               if (stale.attempt >= 2) {
@@ -112,36 +120,49 @@ jobs:
                   `status=${stale.status}\n` +
                   `age_ms=${stale.ageMs}\n` +
                   `run=${stale.runUrl}`;
-                await github.rest.issues.createComment({
-                  owner,
-                  repo,
-                  issue_number: stale.prNumber,
-                  body: noRetryMarker,
-                });
+                try {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: stale.prNumber,
+                    body: noRetryMarker,
+                  });
+                } catch (commentErr) {
+                  core.warning(
+                    `Watchdog: failed to write no-retry marker for pr=${stale.prNumber} sha=${stale.sha}: ${commentErr}`
+                  );
+                }
                 continue;
               }
 
-              const alreadyRetried = issueComments.some(c => String(c.body || '').includes(retryMarker));
+              const alreadyRetried = issueComments.some(c => safeString(c.body).includes(retryMarker));
               if (alreadyRetried) {
                 core.info(`Skip watchdog retry for pr=${stale.prNumber} sha=${stale.sha}: marker already exists.`);
                 continue;
               }
 
-              const retryComment = await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: stale.prNumber,
-                body:
-                  `${retryMarker}\n` +
-                  `Watchdog cancelled stale autofix run and queued a single retry.\n\n` +
-                  `pr=#${stale.prNumber}\n` +
-                  `sha=${stale.sha}\n` +
-                  `status=${stale.status}\n` +
-                  `age_ms=${stale.ageMs}\n` +
-                  `cancelled_run=${stale.runUrl}\n` +
-                  `source=watchdog-stale-run`,
-              });
-              const retryCommentId = retryComment?.data?.id || null;
+              let retryCommentId = null;
+              try {
+                const retryComment = await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: stale.prNumber,
+                  body:
+                    `${retryMarker}\n` +
+                    `Watchdog cancelled stale autofix run and queued a single retry.\n\n` +
+                    `pr=#${stale.prNumber}\n` +
+                    `sha=${stale.sha}\n` +
+                    `status=${stale.status}\n` +
+                    `age_ms=${stale.ageMs}\n` +
+                    `cancelled_run=${stale.runUrl}\n` +
+                    `source=watchdog-stale-run`,
+                });
+                retryCommentId = retryComment?.data?.id || null;
+              } catch (commentErr) {
+                core.warning(
+                  `Watchdog: failed to write retry marker for pr=${stale.prNumber} sha=${stale.sha}; continuing: ${commentErr}`
+                );
+              }
 
               let batchDispatched = false;
               try {
