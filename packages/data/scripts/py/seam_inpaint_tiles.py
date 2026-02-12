@@ -70,27 +70,29 @@ def _copy_png_tree(in_dir, out_dir):
     return copied
 
 
-def _find_grid(tile_layer_dir):
+def _find_index_sets(tile_layer_dir):
     z0 = os.path.join(tile_layer_dir, "0")
     if not os.path.isdir(z0):
         raise ValueError(f"missing tiles dir: {z0} (expected 0/x/y.png)")
-    xs = []
-    ys = []
+
+    x_vals = []
+    y_vals = set()
     for xname in os.listdir(z0):
         xdir = os.path.join(z0, xname)
         if not (os.path.isdir(xdir) and xname.isdigit()):
             continue
-        x = int(xname)
-        xs.append(x)
+        x_vals.append(int(xname))
         for fn in os.listdir(xdir):
             if not fn.lower().endswith(".png"):
                 continue
             yname = fn[:-4]
             if yname.isdigit():
-                ys.append(int(yname))
-    if not xs or not ys:
+                y_vals.add(int(yname))
+
+    if not x_vals or not y_vals:
         raise ValueError(f"no tile coords found under: {z0}")
-    return max(max(xs), max(ys)) + 1
+
+    return sorted(set(x_vals)), sorted(y_vals)
 
 
 def _tile_path(layer_dir, x, y):
@@ -146,7 +148,8 @@ def _run_inpaint(
 def _process_vertical(
     *,
     layer_dir,
-    x,
+    x_left,
+    x_right,
     y,
     w,
     h,
@@ -157,8 +160,8 @@ def _process_vertical(
     write_half,
     run_inpaint,
 ):
-    left_path = _tile_path(layer_dir, x, y)
-    right_path = _tile_path(layer_dir, x + 1, y)
+    left_path = _tile_path(layer_dir, x_left, y)
+    right_path = _tile_path(layer_dir, x_right, y)
     if not (os.path.exists(left_path) and os.path.exists(right_path)):
         return False, "missing_tiles"
 
@@ -215,7 +218,8 @@ def _process_horizontal(
     *,
     layer_dir,
     x,
-    y,
+    y_top,
+    y_bottom,
     w,
     h,
     mx,
@@ -225,8 +229,8 @@ def _process_horizontal(
     write_half,
     run_inpaint,
 ):
-    top_path = _tile_path(layer_dir, x, y)
-    bottom_path = _tile_path(layer_dir, x, y + 1)
+    top_path = _tile_path(layer_dir, x, y_top)
+    bottom_path = _tile_path(layer_dir, x, y_bottom)
     if not (os.path.exists(top_path) and os.path.exists(bottom_path)):
         return False, "missing_tiles"
 
@@ -346,8 +350,12 @@ def main():
     t0 = time.time()
 
     copied_files = _copy_png_tree(args.in_dir, args.out_dir)
-    grid = _find_grid(args.out_dir)
-    first = _tile_path(args.out_dir, 0, 0)
+    x_vals, y_vals = _find_index_sets(args.out_dir)
+    grid_x = len(x_vals)
+    grid_y = len(y_vals)
+    grid = max(grid_x, grid_y)
+
+    first = _tile_path(args.out_dir, x_vals[0], y_vals[0])
     if not os.path.exists(first):
         raise SystemExit(f"missing first tile in out dir: {first}")
     img0 = Image.open(first).convert("RGB")
@@ -450,28 +458,62 @@ def main():
             cross_attention_kwargs=cross_attention_kwargs,
         )
 
-    seams_total = (grid - 1) * grid + (grid - 1) * grid
+    vertical_pairs = []
+    x_gaps = []
+    for i in range(max(0, grid_x - 1)):
+        left = int(x_vals[i])
+        right = int(x_vals[i + 1])
+        if right == left + 1:
+            vertical_pairs.append((left, right))
+        elif right > left + 1:
+            x_gaps.append({"left": left, "right": right, "missing": int(right - left - 1)})
+
+    horizontal_pairs = []
+    y_gaps = []
+    for i in range(max(0, grid_y - 1)):
+        top = int(y_vals[i])
+        bottom = int(y_vals[i + 1])
+        if bottom == top + 1:
+            horizontal_pairs.append((top, bottom))
+        elif bottom > top + 1:
+            y_gaps.append({"top": top, "bottom": bottom, "missing": int(bottom - top - 1)})
+
+    seams_total = len(vertical_pairs) * grid_y + len(horizontal_pairs) * grid_x
     seam_idx = 0
     seams_processed = 0
     seams_skipped = 0
     processed_v = 0
     processed_h = 0
     skipped_reasons = {}
+    suspicious_seams = []
+    suspicious_limit = 256
 
-    def add_skip(reason):
+    def add_skip(reason, seam_info):
         nonlocal seams_skipped
         seams_skipped += 1
         skipped_reasons[reason] = int(skipped_reasons.get(reason, 0)) + 1
+        if len(suspicious_seams) < suspicious_limit:
+            suspicious_seams.append({"reason": str(reason), **seam_info})
+
+    for gap in x_gaps:
+        if len(suspicious_seams) >= suspicious_limit:
+            break
+        suspicious_seams.append({"reason": "x_index_gap", **gap})
+    for gap in y_gaps:
+        if len(suspicious_seams) >= suspicious_limit:
+            break
+        suspicious_seams.append({"reason": "y_index_gap", **gap})
 
     # Vertical seams first.
-    for y in range(grid):
-        for x in range(grid - 1):
+    for y in y_vals:
+        for x_left, x_right in vertical_pairs:
             if args.max_seams > 0 and seams_processed >= args.max_seams:
                 break
             ok, reason = _process_vertical(
                 layer_dir=args.out_dir,
-                x=x,
-                y=y,
+                x_left=int(x_left),
+                x_right=int(x_right),
+                y=int(y),
                 w=w,
                 h=h,
                 mx=mx,
@@ -486,22 +528,27 @@ def main():
                 seams_processed += 1
                 processed_v += 1
             else:
-                add_skip(reason)
-            print(json.dumps({"seam": "v", "x": x, "y": y, "ok": bool(ok), "reason": reason}))
+                add_skip(reason, {"seam": "v", "x_left": int(x_left), "x_right": int(x_right), "y": int(y)})
+            print(
+                json.dumps(
+                    {"seam": "v", "x_left": int(x_left), "x_right": int(x_right), "y": int(y), "ok": bool(ok), "reason": reason}
+                )
+            )
             sys.stdout.flush()
         if args.max_seams > 0 and seams_processed >= args.max_seams:
             break
 
     # Horizontal seams.
     if not (args.max_seams > 0 and seams_processed >= args.max_seams):
-        for y in range(grid - 1):
-            for x in range(grid):
+        for y_top, y_bottom in horizontal_pairs:
+            for x in x_vals:
                 if args.max_seams > 0 and seams_processed >= args.max_seams:
                     break
                 ok, reason = _process_horizontal(
                     layer_dir=args.out_dir,
-                    x=x,
-                    y=y,
+                    x=int(x),
+                    y_top=int(y_top),
+                    y_bottom=int(y_bottom),
                     w=w,
                     h=h,
                     mx=mx,
@@ -516,8 +563,19 @@ def main():
                     seams_processed += 1
                     processed_h += 1
                 else:
-                    add_skip(reason)
-                print(json.dumps({"seam": "h", "x": x, "y": y, "ok": bool(ok), "reason": reason}))
+                    add_skip(reason, {"seam": "h", "x": int(x), "y_top": int(y_top), "y_bottom": int(y_bottom)})
+                print(
+                    json.dumps(
+                        {
+                            "seam": "h",
+                            "x": int(x),
+                            "y_top": int(y_top),
+                            "y_bottom": int(y_bottom),
+                            "ok": bool(ok),
+                            "reason": reason,
+                        }
+                    )
+                )
                 sys.stdout.flush()
             if args.max_seams > 0 and seams_processed >= args.max_seams:
                 break
@@ -532,18 +590,26 @@ def main():
         "lora_scale": float(args.lora_scale) if args.lora else None,
         "copied_files": int(copied_files),
         "grid": int(grid),
+        "grid_xy": {"x": int(grid_x), "y": int(grid_y)},
+        "x_values": [int(v) for v in x_vals],
+        "y_values": [int(v) for v in y_vals],
         "tile_size": {"w": int(w), "h": int(h)},
         "overlap": float(args.overlap),
         "crop_margin_px": {"x": int(mx), "y": int(my)},
         "seam_context": int(seam_context),
         "mask_half": int(args.mask_half),
         "write_half": int(args.write_half),
+        "vertical_pairs": int(len(vertical_pairs)),
+        "horizontal_pairs": int(len(horizontal_pairs)),
+        "x_index_gaps": x_gaps,
+        "y_index_gaps": y_gaps,
         "seams_total": int(seams_total),
         "seams_processed": int(seams_processed),
         "seams_vertical_processed": int(processed_v),
         "seams_horizontal_processed": int(processed_h),
         "seams_skipped": int(seams_skipped),
         "skipped_reasons": skipped_reasons,
+        "suspicious_seams": suspicious_seams,
         "strength": float(args.strength),
         "steps_requested": int(steps_requested),
         "steps_effective": int(steps_effective),

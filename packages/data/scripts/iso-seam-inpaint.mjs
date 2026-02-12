@@ -109,6 +109,7 @@ export async function seamInpaintTiles({
   if (!/^[a-zA-Z0-9._-]+$/.test(outLayerName)) throw new Error(`Invalid --out_layer: ${outLayerName}`);
   if (outLayerName === layer) throw new Error('--out_layer must be different from --layer');
   const outDirAbs = path.join(baseAbs, outLayerName);
+  await fs.rm(outDirAbs, { recursive: true, force: true });
   await fs.mkdir(outDirAbs, { recursive: true });
 
   const tilejsonAbs = path.join(baseAbs, 'tilejson.json');
@@ -167,9 +168,12 @@ export async function seamInpaintTiles({
 
   if (!(await fileExists(reportAbs))) throw new Error(`Seam inpaint failed: missing report: ${reportAbs}`);
   const report = JSON.parse(await fs.readFile(reportAbs, 'utf8'));
+  const seamsTotal = Number(report?.seams_total ?? 0);
   const seamsProcessed = Number(report?.seams_processed ?? 0);
-  if (!Number.isFinite(seamsProcessed) || seamsProcessed <= 0) {
-    throw new Error(`Smoke check failed: expected seams_processed > 0, got: ${String(report?.seams_processed)}`);
+  if (seamsTotal > 0 && (!Number.isFinite(seamsProcessed) || seamsProcessed <= 0)) {
+    throw new Error(
+      `Smoke check failed: expected seams_processed > 0 for seams_total=${String(seamsTotal)}, got: ${String(report?.seams_processed)}`,
+    );
   }
 
   await addFilesToManifest({ manifestPath, runRoot, absPaths: [reportAbs] });
@@ -180,7 +184,10 @@ export async function seamInpaintTiles({
     outLayer: outLayerName,
     overlap,
     reportRel: path.relative(runRoot, reportAbs).replaceAll('\\', '/'),
+    seamsTotal,
     seamsProcessed,
+    seamsSkipped: Number(report?.seams_skipped ?? 0),
+    suspiciousSeams: Array.isArray(report?.suspicious_seams) ? report.suspicious_seams.length : 0,
   };
 }
 
