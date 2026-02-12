@@ -29,3 +29,5 @@ Required GitHub repo secrets:
 - `apps/web`: Next.js web app (MapLibre UI)
 - `packages/shared`: shared types/utils
 - `packages/data`: data pipeline CLIs (AOI, OSM, tiles, metrics)
+
+- Smoke marker: AI-gate e2e test PR.
