@@ -95,7 +95,7 @@ pnpm data:image:batch \
 # Stitch a quick mosaic for visual QA (optional)
 pnpm data:iso:mosaic --run_id=tashkent_2026-02-07 --tiles_dir=exports/iso_gmp_tiles/grid_3 --layer=pixel
 
-# Whitebox seam smoke pipeline (raw -> sd -> sd_seam -> pixel_seam + mosaics + quality report)
+# Whitebox seam smoke pipeline (raw -> sd -> sd_seam -> sd_seam_global -> pixel + mosaics + quality report)
 pnpm data:iso:whitebox:seam:smoke \
   --run_id=tashkent_2026-02-07 \
   --model=stabilityai/stable-diffusion-xl-base-1.0 \
@@ -103,7 +103,17 @@ pnpm data:iso:whitebox:seam:smoke \
   --bbox_scale=0.12 --min_area_m2=30 --outline_opacity=0.06 --device=mps \
   --seam_strength=0.14 --mask_half=16 --write_half=20 --harmonize_half=12 \
   --intersection_pass=1 --intersection_mask_half=10 --intersection_write_half=24 --max_intersections=0 \
+  --global_pass=1 --global_strength=0.08 --global_steps=12 --global_guidance=4.2 \
+  --global_tile_px=1024 --global_tile_overlap_px=256 --global_tile_feather_px=128 \
+  --global_intersection_pass=1 --global_intersection_half=120 --global_intersection_boost=0.08 \
   --seam_mosaic_mode=blend --seam_mosaic_feather=24
+
+# Standalone global tiled diffusion pass for any layer
+pnpm data:iso:stylize:diffusion:tiled \
+  --run_id=tashkent_2026-02-07 \
+  --tiles_dir=exports/iso_whitebox \
+  --layer=sd_whitebox_seam --out_layer=sd_whitebox_seam_global \
+  --model=stabilityai/stable-diffusion-xl-base-1.0 --device=mps
 
 pnpm data:grid --run_id=tashkent_2026-02-07 --cell=500
 pnpm data:metrics:grid --run_id=tashkent_2026-02-07 --cell=500
