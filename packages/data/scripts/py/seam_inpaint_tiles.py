@@ -834,7 +834,6 @@ def main():
         skipped_reasons[reason] = int(skipped_reasons.get(reason, 0)) + 1
         if len(suspicious_seams) < suspicious_limit:
             suspicious_seams.append({"reason": str(reason), **seam_info})
-
     for gap in x_gaps:
         if len(suspicious_seams) >= suspicious_limit:
             break
