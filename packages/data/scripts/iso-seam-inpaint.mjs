@@ -29,6 +29,10 @@ Options:
   --mask_half      Half-width of inpaint mask band around seam in px (default: 16)
   --write_half     Half-width written back into each neighbor tile in px (default: 20)
   --harmonize_half Symmetric cross-tile blend half-width after writeback (default: 12, 0=disable)
+  --intersection_pass Run extra 4-tile intersection pass after seam passes (0|1, default: 1)
+  --intersection_mask_half Inpaint square half-width at seam crossing (default: 10)
+  --intersection_write_half Radial writeback radius at seam crossing (default: 24)
+  --max_intersections Optional cap on processed intersections (default: 0=all)
   --max_seams      Optional cap on processed seams (default: 0=all)
   --seed           Seed base (default: 0; -1=random base)
   --device         auto|cuda|mps|cpu (default: auto)
@@ -90,6 +94,10 @@ export async function seamInpaintTiles({
   maskHalf = 16,
   writeHalf = 20,
   harmonizeHalf = 12,
+  intersectionPass = 1,
+  intersectionMaskHalf = 10,
+  intersectionWriteHalf = 24,
+  maxIntersections = 0,
   maxSeams = 0,
   seed = 0,
   device = 'auto',
@@ -161,6 +169,14 @@ export async function seamInpaintTiles({
       String(writeHalf),
       '--harmonize_half',
       String(harmonizeHalf),
+      '--intersection_pass',
+      String(intersectionPass),
+      '--intersection_mask_half',
+      String(intersectionMaskHalf),
+      '--intersection_write_half',
+      String(intersectionWriteHalf),
+      '--max_intersections',
+      String(maxIntersections),
       '--max_seams',
       String(maxSeams),
       '--seed',
@@ -191,6 +207,9 @@ export async function seamInpaintTiles({
     seamsTotal,
     seamsProcessed,
     seamsSkipped: Number(report?.seams_skipped ?? 0),
+    intersectionsTotal: Number(report?.intersections_total ?? 0),
+    intersectionsProcessed: Number(report?.intersections_processed ?? 0),
+    intersectionsSkipped: Number(report?.intersections_skipped ?? 0),
     suspiciousSeams: Array.isArray(report?.suspicious_seams) ? report.suspicious_seams.length : 0,
   };
 }
@@ -230,6 +249,10 @@ async function main() {
       maskHalf: readNumber(args, 'mask_half', 'maskHalf', 16),
       writeHalf: readNumber(args, 'write_half', 'writeHalf', 20),
       harmonizeHalf: readNumber(args, 'harmonize_half', 'harmonizeHalf', 12),
+      intersectionPass: readNumber(args, 'intersection_pass', 'intersectionPass', 1),
+      intersectionMaskHalf: readNumber(args, 'intersection_mask_half', 'intersectionMaskHalf', 10),
+      intersectionWriteHalf: readNumber(args, 'intersection_write_half', 'intersectionWriteHalf', 24),
+      maxIntersections: readNumber(args, 'max_intersections', 'maxIntersections', 0),
       maxSeams: readNumber(args, 'max_seams', 'maxSeams', 0),
       seed: readNumber(args, 'seed', 'seed', 0),
       device: typeof args.device === 'string' ? args.device : 'auto',

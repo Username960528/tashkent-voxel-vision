@@ -100,7 +100,10 @@ pnpm data:iso:whitebox:seam:smoke \
   --run_id=tashkent_2026-02-07 \
   --model=stabilityai/stable-diffusion-xl-base-1.0 \
   --z_min=0 --z_max=0 --tile_size=1024 --ppm=0.09 --height_scale=2.1 --overlap=0.10 \
-  --bbox_scale=0.12 --min_area_m2=30 --outline_opacity=0.06 --device=mps
+  --bbox_scale=0.12 --min_area_m2=30 --outline_opacity=0.06 --device=mps \
+  --seam_strength=0.14 --mask_half=16 --write_half=20 --harmonize_half=12 \
+  --intersection_pass=1 --intersection_mask_half=10 --intersection_write_half=24 --max_intersections=0 \
+  --seam_mosaic_mode=blend --seam_mosaic_feather=24
 
 pnpm data:grid --run_id=tashkent_2026-02-07 --cell=500
 pnpm data:metrics:grid --run_id=tashkent_2026-02-07 --cell=500
