@@ -10,6 +10,7 @@ import { findRepoRoot } from './lib/repo-root.mjs';
 function printHelp() {
   console.log(`Usage:
   pnpm data:iso:whitebox --run_id=<id> [--z_min=0 --z_max=2] [--tile_size=512] [--ppm=0.06] [--height_scale=1.6]
+                         [--overlap=0.10]
                          [--bbox_scale=1] [--bbox_center_lon=<lon> --bbox_center_lat=<lat>]
                          [--min_area_m2=16] [--outline_opacity=0.18]
 
@@ -24,7 +25,7 @@ Outputs:
     <z>/<x>/<y>.png
 
 Notes:
-  - This is the first step of the \"isometric NYC\"-style pipeline: produce a deterministic geometry render
+  - This is the first step of the "isometric NYC"-style pipeline: produce a deterministic geometry render
     per tile, which later becomes the conditioning input for image-to-image stylization.
   - By default we write empty tiles too (for predictable pyramid coverage). Use --skip_empty to omit them.
   - Use --bbox_scale < 1 to render a smaller neighborhood around AOI center (or custom --bbox_center_*).
@@ -108,6 +109,7 @@ export async function renderIsoWhitebox({
   tileSize = 512,
   ppm = 0.06,
   heightScale = 1.6,
+  overlap = 0.1,
   bboxScale = 1,
   bboxCenterLon = null,
   bboxCenterLat = null,
@@ -124,6 +126,9 @@ export async function renderIsoWhitebox({
   if (!Number.isFinite(tileSize) || tileSize <= 0) throw new Error(`Invalid --tile_size: ${String(tileSize)}`);
   if (!Number.isFinite(ppm) || ppm <= 0) throw new Error(`Invalid --ppm: ${String(ppm)}`);
   if (!Number.isFinite(heightScale) || heightScale <= 0) throw new Error(`Invalid --height_scale: ${String(heightScale)}`);
+  if (!Number.isFinite(overlap) || overlap < 0 || overlap >= 0.49) {
+    throw new Error(`Invalid --overlap: ${String(overlap)} (expected 0..0.49)`);
+  }
   if (!Number.isFinite(minAreaM2) || minAreaM2 < 0) throw new Error(`Invalid --min_area_m2: ${String(minAreaM2)}`);
   if (!Number.isFinite(outlineOpacity) || outlineOpacity < 0 || outlineOpacity > 1) {
     throw new Error(`Invalid --outline_opacity: ${String(outlineOpacity)}`);
@@ -178,6 +183,8 @@ export async function renderIsoWhitebox({
       String(ppm),
       '--height_scale',
       String(heightScale),
+      '--overlap',
+      String(overlap),
       '--min_area_m2',
       String(minAreaM2),
       '--outline_opacity',
@@ -206,6 +213,7 @@ export async function renderIsoWhitebox({
     outDir,
     bboxUsed,
     tileCount,
+    overlap,
     tilejsonRel: path.relative(runRoot, tilejsonAbs).replaceAll('\\', '/'),
     reportRel: path.relative(runRoot, reportPath).replaceAll('\\', '/'),
   };
@@ -224,6 +232,7 @@ async function main() {
   const tileSize = Number(typeof args.tile_size === 'string' ? args.tile_size : args.tileSize);
   const ppm = Number(typeof args.ppm === 'string' ? args.ppm : args.pixels_per_meter);
   const heightScale = Number(typeof args.height_scale === 'string' ? args.height_scale : args.heightScale);
+  const overlap = Number(typeof args.overlap === 'string' ? args.overlap : args.pad);
   const bboxScale = Number(typeof args.bbox_scale === 'string' ? args.bbox_scale : args.bboxScale);
   const bboxCenterLon = Number(typeof args.bbox_center_lon === 'string' ? args.bbox_center_lon : args.bboxCenterLon);
   const bboxCenterLat = Number(typeof args.bbox_center_lat === 'string' ? args.bbox_center_lat : args.bboxCenterLat);
@@ -243,6 +252,7 @@ async function main() {
       tileSize: Number.isFinite(tileSize) ? tileSize : 512,
       ppm: Number.isFinite(ppm) ? ppm : 0.06,
       heightScale: Number.isFinite(heightScale) ? heightScale : 1.6,
+      overlap: Number.isFinite(overlap) ? overlap : 0.1,
       bboxScale: Number.isFinite(bboxScale) ? bboxScale : 1,
       bboxCenterLon: Number.isFinite(bboxCenterLon) ? bboxCenterLon : null,
       bboxCenterLat: Number.isFinite(bboxCenterLat) ? bboxCenterLat : null,
