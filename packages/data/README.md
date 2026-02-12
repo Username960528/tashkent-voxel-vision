@@ -34,7 +34,7 @@ pnpm data:tiles:buildings --run_id=tashkent_2026-02-07
 pnpm data:tiles:base --run_id=tashkent_2026-02-07
 
 # Isometric "whitebox" tile pyramid (conditioning input for pixel stylization, optional)
-pnpm data:iso:whitebox --run_id=tashkent_2026-02-07 --z_min=0 --z_max=2
+pnpm data:iso:whitebox --run_id=tashkent_2026-02-07 --z_min=0 --z_max=2 --overlap=0.10
 
 # Google Photorealistic 3D Tiles (conditioning preview, optional)
 # - Requires env GMP_API_KEY and a local Chrome/Chromium (set CHROME_EXECUTABLE_PATH if auto-detect fails)
@@ -94,6 +94,13 @@ pnpm data:image:batch \
 
 # Stitch a quick mosaic for visual QA (optional)
 pnpm data:iso:mosaic --run_id=tashkent_2026-02-07 --tiles_dir=exports/iso_gmp_tiles/grid_3 --layer=pixel
+
+# Whitebox seam smoke pipeline (raw -> sd -> sd_seam -> pixel_seam + mosaics + quality report)
+pnpm data:iso:whitebox:seam:smoke \
+  --run_id=tashkent_2026-02-07 \
+  --model=stabilityai/stable-diffusion-xl-base-1.0 \
+  --z_min=0 --z_max=0 --tile_size=1024 --ppm=0.09 --height_scale=2.1 --overlap=0.10 \
+  --bbox_scale=0.12 --min_area_m2=30 --outline_opacity=0.06 --device=mps
 
 pnpm data:grid --run_id=tashkent_2026-02-07 --cell=500
 pnpm data:metrics:grid --run_id=tashkent_2026-02-07 --cell=500

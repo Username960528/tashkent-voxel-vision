@@ -91,6 +91,7 @@ export async function stylizeDiffusionDir({
   if (!(await fileExists(inDirAbs))) throw new Error(`Missing --in_dir: ${inDirAbs}`);
 
   const outDirAbs = path.join(runRoot, outDirRel);
+  await fs.rm(outDirAbs, { recursive: true, force: true });
   await fs.mkdir(outDirAbs, { recursive: true });
 
   const reportAbs = path.join(outDirAbs, 'report.json');
