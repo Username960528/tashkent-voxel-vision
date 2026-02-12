@@ -70,27 +70,29 @@ def _copy_png_tree(in_dir, out_dir):
     return copied
 
 
-def _find_grid(tile_layer_dir):
+def _find_index_sets(tile_layer_dir):
     z0 = os.path.join(tile_layer_dir, "0")
     if not os.path.isdir(z0):
         raise ValueError(f"missing tiles dir: {z0} (expected 0/x/y.png)")
-    xs = []
-    ys = []
+
+    x_vals = []
+    y_vals = set()
     for xname in os.listdir(z0):
         xdir = os.path.join(z0, xname)
         if not (os.path.isdir(xdir) and xname.isdigit()):
             continue
-        x = int(xname)
-        xs.append(x)
+        x_vals.append(int(xname))
         for fn in os.listdir(xdir):
             if not fn.lower().endswith(".png"):
                 continue
             yname = fn[:-4]
             if yname.isdigit():
-                ys.append(int(yname))
-    if not xs or not ys:
+                y_vals.add(int(yname))
+
+    if not x_vals or not y_vals:
         raise ValueError(f"no tile coords found under: {z0}")
-    return max(max(xs), max(ys)) + 1
+
+    return sorted(set(x_vals)), sorted(y_vals)
 
 
 def _tile_path(layer_dir, x, y):
@@ -143,10 +145,133 @@ def _run_inpaint(
     return out.convert("RGB")
 
 
+def _ramp_values(length, start, end):
+    if length <= 0:
+        return []
+    if length == 1:
+        return [int(round(end))]
+    vals = []
+    for i in range(length):
+        t = float(i) / float(length - 1)
+        vals.append(int(round(float(start) + (float(end) - float(start)) * t)))
+    return vals
+
+
+def _blend_paste_x(tile_img, strip, x, y, alpha_start, alpha_end):
+    sw, sh = strip.size
+    if sw <= 0 or sh <= 0:
+        return
+    base = tile_img.crop((x, y, x + sw, y + sh))
+    if sw == 1:
+        tile_img.paste(strip, (x, y))
+        return
+    row = Image.new("L", (sw, 1))
+    row.putdata(_ramp_values(sw, alpha_start, alpha_end))
+    mask = row.resize((sw, sh), resample=Image.Resampling.NEAREST)
+    blended = Image.composite(strip, base, mask)
+    tile_img.paste(blended, (x, y))
+
+
+def _blend_paste_y(tile_img, strip, x, y, alpha_start, alpha_end):
+    sw, sh = strip.size
+    if sw <= 0 or sh <= 0:
+        return
+    base = tile_img.crop((x, y, x + sw, y + sh))
+    if sh == 1:
+        tile_img.paste(strip, (x, y))
+        return
+    col = Image.new("L", (1, sh))
+    col.putdata(_ramp_values(sh, alpha_start, alpha_end))
+    mask = col.resize((sw, sh), resample=Image.Resampling.NEAREST)
+    blended = Image.composite(strip, base, mask)
+    tile_img.paste(blended, (x, y))
+
+
+def _corner_mask_radial(sw, sh, corner, radius):
+    if sw <= 0 or sh <= 0:
+        return None
+    r = int(max(1, radius))
+    inv_r = 1.0 / float(r)
+    data = []
+    for y in range(sh):
+        for x in range(sw):
+            if corner == "tl":
+                dx = float(x)
+                dy = float(y)
+            elif corner == "tr":
+                dx = float(sw - 1 - x)
+                dy = float(y)
+            elif corner == "bl":
+                dx = float(x)
+                dy = float(sh - 1 - y)
+            elif corner == "br":
+                dx = float(sw - 1 - x)
+                dy = float(sh - 1 - y)
+            else:
+                raise ValueError(f"unsupported corner: {corner}")
+            d = math.hypot(dx, dy)
+            t = max(0.0, 1.0 - d * inv_r)
+            data.append(int(round(255.0 * t * t)))
+    mask = Image.new("L", (sw, sh))
+    mask.putdata(data)
+    return mask
+
+
+def _blend_paste_corner(tile_img, patch, x, y, corner, radius):
+    sw, sh = patch.size
+    if sw <= 0 or sh <= 0:
+        return
+    base = tile_img.crop((x, y, x + sw, y + sh))
+    mask = _corner_mask_radial(sw, sh, corner=corner, radius=radius)
+    if mask is None:
+        return
+    blended = Image.composite(patch, base, mask)
+    tile_img.paste(blended, (x, y))
+
+
+def _harmonize_vertical_columns(left, right, seam_left_x, seam_right_x, top, bottom, half):
+    if half <= 0 or bottom <= top:
+        return
+    for d in range(int(half)):
+        lx = int(seam_left_x - d)
+        rx = int(seam_right_x + d)
+        if lx < 0 or rx < 0:
+            break
+        lcol = left.crop((lx, top, lx + 1, bottom))
+        rcol = right.crop((rx, top, rx + 1, bottom))
+        avg = Image.blend(lcol, rcol, 0.5)
+        if int(half) <= 1:
+            t = 1.0
+        else:
+            t = 1.0 - float(d) / float(int(half) - 1)
+        left.paste(Image.blend(lcol, avg, t), (lx, top))
+        right.paste(Image.blend(rcol, avg, t), (rx, top))
+
+
+def _harmonize_horizontal_rows(top_img, bottom_img, seam_top_y, seam_bottom_y, left, right, half):
+    if half <= 0 or right <= left:
+        return
+    for d in range(int(half)):
+        ty = int(seam_top_y - d)
+        by = int(seam_bottom_y + d)
+        if ty < 0 or by < 0:
+            break
+        trow = top_img.crop((left, ty, right, ty + 1))
+        brow = bottom_img.crop((left, by, right, by + 1))
+        avg = Image.blend(trow, brow, 0.5)
+        if int(half) <= 1:
+            t = 1.0
+        else:
+            t = 1.0 - float(d) / float(int(half) - 1)
+        top_img.paste(Image.blend(trow, avg, t), (left, ty))
+        bottom_img.paste(Image.blend(brow, avg, t), (left, by))
+
+
 def _process_vertical(
     *,
     layer_dir,
-    x,
+    x_left,
+    x_right,
     y,
     w,
     h,
@@ -155,10 +280,11 @@ def _process_vertical(
     seam_context,
     mask_half,
     write_half,
+    harmonize_half,
     run_inpaint,
 ):
-    left_path = _tile_path(layer_dir, x, y)
-    right_path = _tile_path(layer_dir, x + 1, y)
+    left_path = _tile_path(layer_dir, x_left, y)
+    right_path = _tile_path(layer_dir, x_right, y)
     if not (os.path.exists(left_path) and os.path.exists(right_path)):
         return False, "missing_tiles"
 
@@ -204,8 +330,34 @@ def _process_vertical(
     left_strip = out.crop((split - whalf, 0, split, patch_h))
     right_strip = out.crop((split, 0, split + whalf, patch_h))
 
-    left.paste(left_strip, (w - mx - whalf, top))
-    right.paste(right_strip, (mx, top))
+    # Feather write-back from old tile content to inpainted seam strip to avoid
+    # visible "write band" edges at strip boundaries.
+    _blend_paste_x(
+        tile_img=left,
+        strip=left_strip,
+        x=w - mx - whalf,
+        y=top,
+        alpha_start=0,
+        alpha_end=255,
+    )
+    _blend_paste_x(
+        tile_img=right,
+        strip=right_strip,
+        x=mx,
+        y=top,
+        alpha_start=255,
+        alpha_end=0,
+    )
+    hhalf = max(0, min(int(harmonize_half), int(whalf)))
+    _harmonize_vertical_columns(
+        left=left,
+        right=right,
+        seam_left_x=int(w - mx - 1),
+        seam_right_x=int(mx),
+        top=int(top),
+        bottom=int(bottom),
+        half=hhalf,
+    )
     left.save(left_path, "PNG")
     right.save(right_path, "PNG")
     return True, "ok"
@@ -215,7 +367,8 @@ def _process_horizontal(
     *,
     layer_dir,
     x,
-    y,
+    y_top,
+    y_bottom,
     w,
     h,
     mx,
@@ -223,10 +376,11 @@ def _process_horizontal(
     seam_context,
     mask_half,
     write_half,
+    harmonize_half,
     run_inpaint,
 ):
-    top_path = _tile_path(layer_dir, x, y)
-    bottom_path = _tile_path(layer_dir, x, y + 1)
+    top_path = _tile_path(layer_dir, x, y_top)
+    bottom_path = _tile_path(layer_dir, x, y_bottom)
     if not (os.path.exists(top_path) and os.path.exists(bottom_path)):
         return False, "missing_tiles"
 
@@ -272,10 +426,150 @@ def _process_horizontal(
     top_strip = out.crop((0, split - whalf, patch_w, split))
     bottom_strip = out.crop((0, split, patch_w, split + whalf))
 
-    top_img.paste(top_strip, (left, h - my - whalf))
-    bottom_img.paste(bottom_strip, (left, my))
+    _blend_paste_y(
+        tile_img=top_img,
+        strip=top_strip,
+        x=left,
+        y=h - my - whalf,
+        alpha_start=0,
+        alpha_end=255,
+    )
+    _blend_paste_y(
+        tile_img=bottom_img,
+        strip=bottom_strip,
+        x=left,
+        y=my,
+        alpha_start=255,
+        alpha_end=0,
+    )
+    hhalf = max(0, min(int(harmonize_half), int(whalf)))
+    _harmonize_horizontal_rows(
+        top_img=top_img,
+        bottom_img=bottom_img,
+        seam_top_y=int(h - my - 1),
+        seam_bottom_y=int(my),
+        left=int(left),
+        right=int(right),
+        half=hhalf,
+    )
     top_img.save(top_path, "PNG")
     bottom_img.save(bottom_path, "PNG")
+    return True, "ok"
+
+
+def _process_intersection(
+    *,
+    layer_dir,
+    x_left,
+    x_right,
+    y_top,
+    y_bottom,
+    w,
+    h,
+    mx,
+    my,
+    seam_context,
+    intersection_mask_half,
+    intersection_write_half,
+    run_inpaint,
+):
+    tl_path = _tile_path(layer_dir, x_left, y_top)
+    tr_path = _tile_path(layer_dir, x_right, y_top)
+    bl_path = _tile_path(layer_dir, x_left, y_bottom)
+    br_path = _tile_path(layer_dir, x_right, y_bottom)
+    if not (os.path.exists(tl_path) and os.path.exists(tr_path) and os.path.exists(bl_path) and os.path.exists(br_path)):
+        return False, "missing_tiles"
+
+    x0_l = max(0, w - mx - seam_context)
+    x1_l = min(w, w - mx + seam_context)
+    x0_r = max(0, mx - seam_context)
+    x1_r = min(w, mx + seam_context)
+    y0_t = max(0, h - my - seam_context)
+    y1_t = min(h, h - my + seam_context)
+    y0_b = max(0, my - seam_context)
+    y1_b = min(h, my + seam_context)
+    if x1_l <= x0_l or x1_r <= x0_r or y1_t <= y0_t or y1_b <= y0_b:
+        return False, "invalid_context"
+
+    tl = Image.open(tl_path).convert("RGB")
+    tr = Image.open(tr_path).convert("RGB")
+    bl = Image.open(bl_path).convert("RGB")
+    br = Image.open(br_path).convert("RGB")
+
+    seg_tl = tl.crop((x0_l, y0_t, x1_l, y1_t))
+    seg_tr = tr.crop((x0_r, y0_t, x1_r, y1_t))
+    seg_bl = bl.crop((x0_l, y0_b, x1_l, y1_b))
+    seg_br = br.crop((x0_r, y0_b, x1_r, y1_b))
+    if min(seg_tl.width, seg_tr.width, seg_bl.width, seg_br.width) <= 0:
+        return False, "empty_patch"
+    if min(seg_tl.height, seg_tr.height, seg_bl.height, seg_br.height) <= 0:
+        return False, "empty_patch"
+
+    split_x = seg_tl.width
+    split_y = seg_tl.height
+    patch_w = seg_tl.width + seg_tr.width
+    patch_h = seg_tl.height + seg_bl.height
+    half_limit_x = min(split_x, patch_w - split_x) - 1
+    half_limit_y = min(split_y, patch_h - split_y) - 1
+    half_limit = min(half_limit_x, half_limit_y)
+    if half_limit <= 0:
+        return False, "tiny_patch"
+    mhalf = max(1, min(intersection_mask_half, half_limit))
+    whalf = max(1, min(intersection_write_half, min(split_x, split_y)))
+
+    patch = Image.new("RGB", (patch_w, patch_h), "#808080")
+    patch.paste(seg_tl, (0, 0))
+    patch.paste(seg_tr, (split_x, 0))
+    patch.paste(seg_bl, (0, split_y))
+    patch.paste(seg_br, (split_x, split_y))
+
+    mask = Image.new("L", (patch_w, patch_h), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rectangle((split_x - mhalf, split_y - mhalf, split_x + mhalf, split_y + mhalf), fill=255)
+
+    out = run_inpaint(patch, mask)
+    out_tl = out.crop((0, 0, split_x, split_y))
+    out_tr = out.crop((split_x, 0, patch_w, split_y))
+    out_bl = out.crop((0, split_y, split_x, patch_h))
+    out_br = out.crop((split_x, split_y, patch_w, patch_h))
+
+    _blend_paste_corner(
+        tile_img=tl,
+        patch=out_tl,
+        x=x0_l,
+        y=y0_t,
+        corner="br",
+        radius=whalf,
+    )
+    _blend_paste_corner(
+        tile_img=tr,
+        patch=out_tr,
+        x=x0_r,
+        y=y0_t,
+        corner="bl",
+        radius=whalf,
+    )
+    _blend_paste_corner(
+        tile_img=bl,
+        patch=out_bl,
+        x=x0_l,
+        y=y0_b,
+        corner="tr",
+        radius=whalf,
+    )
+    _blend_paste_corner(
+        tile_img=br,
+        patch=out_br,
+        x=x0_r,
+        y=y0_b,
+        corner="tl",
+        radius=whalf,
+    )
+
+    tl.save(tl_path, "PNG")
+    tr.save(tr_path, "PNG")
+    bl.save(bl_path, "PNG")
+    br.save(br_path, "PNG")
     return True, "ok"
 
 
@@ -296,6 +590,36 @@ def main():
     ap.add_argument("--seam_context", type=int, default=0, help="Context px on each side around seam (0=auto)")
     ap.add_argument("--mask_half", type=int, default=16, help="Inpaint mask half-width in px")
     ap.add_argument("--write_half", type=int, default=20, help="Writeback half-width into each tile in px")
+    ap.add_argument(
+        "--harmonize_half",
+        type=int,
+        default=12,
+        help="Symmetric cross-tile blend half-width after writeback (default: 12, 0=disable)",
+    )
+    ap.add_argument(
+        "--intersection_pass",
+        type=int,
+        default=1,
+        help="Run extra 4-tile intersection inpaint pass after seam passes (default: 1)",
+    )
+    ap.add_argument(
+        "--intersection_mask_half",
+        type=int,
+        default=10,
+        help="Intersection inpaint square half-width around seam crossing (default: 10)",
+    )
+    ap.add_argument(
+        "--intersection_write_half",
+        type=int,
+        default=24,
+        help="Intersection radial writeback radius in px per tile corner (default: 24)",
+    )
+    ap.add_argument(
+        "--max_intersections",
+        type=int,
+        default=0,
+        help="Optional cap on processed intersections (0=all)",
+    )
     ap.add_argument("--max_seams", type=int, default=0, help="Optional seam cap (0=all)")
     ap.add_argument("--seed", type=int, default=0, help="Seed base; -1=random")
     ap.add_argument("--device", default="auto", help="auto|cuda|mps|cpu")
@@ -315,6 +639,16 @@ def main():
         raise SystemExit("--write_half must be > 0")
     if args.seam_context < 0:
         raise SystemExit("--seam_context must be >= 0")
+    if args.harmonize_half < 0:
+        raise SystemExit("--harmonize_half must be >= 0")
+    if args.intersection_pass not in (0, 1):
+        raise SystemExit("--intersection_pass must be 0 or 1")
+    if args.intersection_mask_half <= 0:
+        raise SystemExit("--intersection_mask_half must be > 0")
+    if args.intersection_write_half <= 0:
+        raise SystemExit("--intersection_write_half must be > 0")
+    if args.max_intersections < 0:
+        raise SystemExit("--max_intersections must be >= 0")
     if args.max_seams < 0:
         raise SystemExit("--max_seams must be >= 0")
 
@@ -346,8 +680,12 @@ def main():
     t0 = time.time()
 
     copied_files = _copy_png_tree(args.in_dir, args.out_dir)
-    grid = _find_grid(args.out_dir)
-    first = _tile_path(args.out_dir, 0, 0)
+    x_vals, y_vals = _find_index_sets(args.out_dir)
+    grid_x = len(x_vals)
+    grid_y = len(y_vals)
+    grid = max(grid_x, grid_y)
+
+    first = _tile_path(args.out_dir, x_vals[0], y_vals[0])
     if not os.path.exists(first):
         raise SystemExit(f"missing first tile in out dir: {first}")
     img0 = Image.open(first).convert("RGB")
@@ -450,28 +788,71 @@ def main():
             cross_attention_kwargs=cross_attention_kwargs,
         )
 
-    seams_total = (grid - 1) * grid + (grid - 1) * grid
+    vertical_pairs = []
+    x_gaps = []
+    for i in range(max(0, grid_x - 1)):
+        left = int(x_vals[i])
+        right = int(x_vals[i + 1])
+        if right == left + 1:
+            vertical_pairs.append((left, right))
+        elif right > left + 1:
+            x_gaps.append({"left": left, "right": right, "missing": int(right - left - 1)})
+
+    horizontal_pairs = []
+    y_gaps = []
+    for i in range(max(0, grid_y - 1)):
+        top = int(y_vals[i])
+        bottom = int(y_vals[i + 1])
+        if bottom == top + 1:
+            horizontal_pairs.append((top, bottom))
+        elif bottom > top + 1:
+            y_gaps.append({"top": top, "bottom": bottom, "missing": int(bottom - top - 1)})
+
+    seams_total = len(vertical_pairs) * grid_y + len(horizontal_pairs) * grid_x
+    intersections_total = len(vertical_pairs) * len(horizontal_pairs)
     seam_idx = 0
     seams_processed = 0
     seams_skipped = 0
+    intersections_processed = 0
+    intersections_skipped = 0
     processed_v = 0
     processed_h = 0
     skipped_reasons = {}
+    suspicious_seams = []
+    suspicious_limit = 256
 
-    def add_skip(reason):
+    def add_skip(reason, seam_info):
         nonlocal seams_skipped
         seams_skipped += 1
         skipped_reasons[reason] = int(skipped_reasons.get(reason, 0)) + 1
+        if len(suspicious_seams) < suspicious_limit:
+            suspicious_seams.append({"reason": str(reason), **seam_info})
+
+    def add_intersection_skip(reason, seam_info):
+        nonlocal intersections_skipped
+        intersections_skipped += 1
+        skipped_reasons[reason] = int(skipped_reasons.get(reason, 0)) + 1
+        if len(suspicious_seams) < suspicious_limit:
+            suspicious_seams.append({"reason": str(reason), **seam_info})
+    for gap in x_gaps:
+        if len(suspicious_seams) >= suspicious_limit:
+            break
+        suspicious_seams.append({"reason": "x_index_gap", **gap})
+    for gap in y_gaps:
+        if len(suspicious_seams) >= suspicious_limit:
+            break
+        suspicious_seams.append({"reason": "y_index_gap", **gap})
 
     # Vertical seams first.
-    for y in range(grid):
-        for x in range(grid - 1):
+    for y in y_vals:
+        for x_left, x_right in vertical_pairs:
             if args.max_seams > 0 and seams_processed >= args.max_seams:
                 break
             ok, reason = _process_vertical(
                 layer_dir=args.out_dir,
-                x=x,
-                y=y,
+                x_left=int(x_left),
+                x_right=int(x_right),
+                y=int(y),
                 w=w,
                 h=h,
                 mx=mx,
@@ -479,6 +860,7 @@ def main():
                 seam_context=seam_context,
                 mask_half=int(args.mask_half),
                 write_half=int(args.write_half),
+                harmonize_half=int(args.harmonize_half),
                 run_inpaint=lambda patch, mask, idx=seam_idx: run_inpaint(patch, mask, idx),
             )
             seam_idx += 1
@@ -486,22 +868,27 @@ def main():
                 seams_processed += 1
                 processed_v += 1
             else:
-                add_skip(reason)
-            print(json.dumps({"seam": "v", "x": x, "y": y, "ok": bool(ok), "reason": reason}))
+                add_skip(reason, {"seam": "v", "x_left": int(x_left), "x_right": int(x_right), "y": int(y)})
+            print(
+                json.dumps(
+                    {"seam": "v", "x_left": int(x_left), "x_right": int(x_right), "y": int(y), "ok": bool(ok), "reason": reason}
+                )
+            )
             sys.stdout.flush()
         if args.max_seams > 0 and seams_processed >= args.max_seams:
             break
 
     # Horizontal seams.
     if not (args.max_seams > 0 and seams_processed >= args.max_seams):
-        for y in range(grid - 1):
-            for x in range(grid):
+        for y_top, y_bottom in horizontal_pairs:
+            for x in x_vals:
                 if args.max_seams > 0 and seams_processed >= args.max_seams:
                     break
                 ok, reason = _process_horizontal(
                     layer_dir=args.out_dir,
-                    x=x,
-                    y=y,
+                    x=int(x),
+                    y_top=int(y_top),
+                    y_bottom=int(y_bottom),
                     w=w,
                     h=h,
                     mx=mx,
@@ -509,6 +896,7 @@ def main():
                     seam_context=seam_context,
                     mask_half=int(args.mask_half),
                     write_half=int(args.write_half),
+                    harmonize_half=int(args.harmonize_half),
                     run_inpaint=lambda patch, mask, idx=seam_idx: run_inpaint(patch, mask, idx),
                 )
                 seam_idx += 1
@@ -516,10 +904,69 @@ def main():
                     seams_processed += 1
                     processed_h += 1
                 else:
-                    add_skip(reason)
-                print(json.dumps({"seam": "h", "x": x, "y": y, "ok": bool(ok), "reason": reason}))
+                    add_skip(reason, {"seam": "h", "x": int(x), "y_top": int(y_top), "y_bottom": int(y_bottom)})
+                print(
+                    json.dumps(
+                        {
+                            "seam": "h",
+                            "x": int(x),
+                            "y_top": int(y_top),
+                            "y_bottom": int(y_bottom),
+                            "ok": bool(ok),
+                            "reason": reason,
+                        }
+                    )
+                )
                 sys.stdout.flush()
             if args.max_seams > 0 and seams_processed >= args.max_seams:
+                break
+
+    run_intersection_pass = bool(int(args.intersection_pass)) and not (
+        args.max_seams > 0 and seams_processed < seams_total
+    )
+    if run_intersection_pass:
+        for y_top, y_bottom in horizontal_pairs:
+            for x_left, x_right in vertical_pairs:
+                if args.max_intersections > 0 and intersections_processed >= args.max_intersections:
+                    break
+                ok, reason = _process_intersection(
+                    layer_dir=args.out_dir,
+                    x_left=int(x_left),
+                    x_right=int(x_right),
+                    y_top=int(y_top),
+                    y_bottom=int(y_bottom),
+                    w=w,
+                    h=h,
+                    mx=mx,
+                    my=my,
+                    seam_context=seam_context,
+                    intersection_mask_half=int(args.intersection_mask_half),
+                    intersection_write_half=int(args.intersection_write_half),
+                    run_inpaint=lambda patch, mask, idx=seam_idx: run_inpaint(patch, mask, idx),
+                )
+                seam_idx += 1
+                if ok:
+                    intersections_processed += 1
+                else:
+                    add_intersection_skip(
+                        reason,
+                        {"seam": "x", "x_left": int(x_left), "x_right": int(x_right), "y_top": int(y_top), "y_bottom": int(y_bottom)},
+                    )
+                print(
+                    json.dumps(
+                        {
+                            "seam": "x",
+                            "x_left": int(x_left),
+                            "x_right": int(x_right),
+                            "y_top": int(y_top),
+                            "y_bottom": int(y_bottom),
+                            "ok": bool(ok),
+                            "reason": reason,
+                        }
+                    )
+                )
+                sys.stdout.flush()
+            if args.max_intersections > 0 and intersections_processed >= args.max_intersections:
                 break
 
     dt = time.time() - t0
@@ -532,18 +979,35 @@ def main():
         "lora_scale": float(args.lora_scale) if args.lora else None,
         "copied_files": int(copied_files),
         "grid": int(grid),
+        "grid_xy": {"x": int(grid_x), "y": int(grid_y)},
+        "x_values": [int(v) for v in x_vals],
+        "y_values": [int(v) for v in y_vals],
         "tile_size": {"w": int(w), "h": int(h)},
         "overlap": float(args.overlap),
         "crop_margin_px": {"x": int(mx), "y": int(my)},
         "seam_context": int(seam_context),
         "mask_half": int(args.mask_half),
         "write_half": int(args.write_half),
+        "harmonize_half": int(args.harmonize_half),
+        "intersection_pass": bool(int(args.intersection_pass)),
+        "intersection_mask_half": int(args.intersection_mask_half),
+        "intersection_write_half": int(args.intersection_write_half),
+        "max_intersections": int(args.max_intersections),
+        "vertical_pairs": int(len(vertical_pairs)),
+        "horizontal_pairs": int(len(horizontal_pairs)),
+        "x_index_gaps": x_gaps,
+        "y_index_gaps": y_gaps,
         "seams_total": int(seams_total),
         "seams_processed": int(seams_processed),
         "seams_vertical_processed": int(processed_v),
         "seams_horizontal_processed": int(processed_h),
         "seams_skipped": int(seams_skipped),
+        "intersections_total": int(intersections_total),
+        "intersections_processed": int(intersections_processed),
+        "intersections_skipped": int(intersections_skipped),
+        "intersection_pass_executed": bool(run_intersection_pass),
         "skipped_reasons": skipped_reasons,
+        "suspicious_seams": suspicious_seams,
         "strength": float(args.strength),
         "steps_requested": int(steps_requested),
         "steps_effective": int(steps_effective),

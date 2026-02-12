@@ -93,6 +93,7 @@ export async function stylizePixelDir({
   if (!(await fileExists(inDirAbs))) throw new Error(`Missing --in_dir: ${inDirAbs}`);
 
   const outDirAbs = path.join(runRoot, outDirRel);
+  await fs.rm(outDirAbs, { recursive: true, force: true });
   await fs.mkdir(outDirAbs, { recursive: true });
 
   const files = await listPngFilesRec(inDirAbs);
