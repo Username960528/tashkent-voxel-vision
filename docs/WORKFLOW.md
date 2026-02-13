@@ -66,12 +66,12 @@ Before expecting fully automatic review+autofix, verify:
 - **Labels**: ensure `needs-codex-fix` and `autofix/codex` exist in the repo.
 
 Notes:
-- If `CODEX_REVIEW_TOKEN` is absent or under-scoped, workflows use `GITHUB_TOKEN` fallback where possible.
+- If `CODEX_REVIEW_TOKEN` is absent or under-scoped, workflows may fall back to `GITHUB_TOKEN` for labeling/dispatch, but will not post `@codex …` commands (Codex ignores `github-actions[bot]`).
 - `codex-autofix-watchdog` is fail-open for PR-comment write errors: it still cancels stale runs and continues retry flow.
 
 ### Codex Review
 
-- On PR open/reopened/ready_for_review/synchronize (non-draft, non-fork), a workflow posts `@codex review` automatically.
+- On PR open/reopened/ready_for_review/synchronize (non-draft, non-fork), a workflow posts `@codex review` automatically (requires `CODEX_REVIEW_TOKEN`).
 - Skip automation if `automation/off` or `no-bot` is present.
 - If Codex leaves inline feedback, a workflow adds the label `needs-codex-fix`.
 - Before manual fixes, check PR comments and commit history for autofix signals (e.g., comment "Dispatching autofix" and commits like "fix: address codex review feedback"); also look for the autofix result comment (`codex-autofix:result`) with a run link; verify if feedback is already resolved before rework.
@@ -103,7 +103,7 @@ Notes:
 ### Self-hosted Autofix (optional, fully automatic)
 
 - A self-hosted runner labeled `codex` can apply fixes directly via `workflow_dispatch` when `autofix/codex` + `needs-codex-fix` are present.
-- `CODEX_REVIEW_TOKEN` is optional; if not set the workflow uses `GITHUB_TOKEN` (comments will be authored by `github-actions[bot]`).
+- `CODEX_REVIEW_TOKEN` is optional for dispatch/labels, but required for workflow-generated `@codex …` comments (review/rereview/address) to be acted on by Codex.
 - Codex auth can be either ChatGPT device auth (preferred for subscription accounts) or API key (`CODEX_API_KEY`). This is controlled by `vars.CODEX_AUTOFIX_LOGIN_METHOD` (or workflow input `login_method`).
 - Default autofix model is `gpt-5.3-codex`; reasoning effort defaults to `xhigh` (`vars.CODEX_AUTOFIX_MODEL` / `vars.CODEX_AUTOFIX_REASONING_EFFORT` override).
 - The workflow uses Codex CLI and pushes changes back to the PR branch.
