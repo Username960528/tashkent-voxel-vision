@@ -13,34 +13,28 @@ const DIFFUSION_REQUIREMENTS = 'packages/data/scripts/py/requirements-diffusion.
 
 function printHelp() {
   console.log(`Usage:
-  pnpm data:iso:seam:inpaint --run_id=<id> --model=<hf_id_or_path> --tiles_dir=<run-rel-dir> [options]
+  pnpm data:iso:stylize:diffusion:tiled --run_id=<id> --model=<hf_id_or_path> --tiles_dir=<run-rel-dir> [options]
 
 Options:
-  --layer          Input layer inside tiles_dir (default: sd)
-  --out_layer      Output layer inside tiles_dir (default: <layer>_seam)
-  --lora           Optional LoRA weights (HF repo id or local path)
-  --lora_scale     LoRA scale (default: 0.8)
-  --prompt         Positive prompt (optional)
-  --negative       Negative prompt (optional)
-  --strength       0..1 denoise strength for inpaint (default: 0.20)
-  --steps          Inference steps (default: 16)
-  --guidance       CFG guidance scale (default: 4.5)
-  --seam_context   Pixels of context per side around seam (default: 0=auto from overlap)
-  --mask_half      Half-width of inpaint mask band around seam in px (default: 16)
-  --write_half     Half-width written back into each neighbor tile in px (default: 20)
-  --harmonize_half Symmetric cross-tile blend half-width after writeback (default: 12, 0=disable)
-  --intersection_pass Run extra 4-tile intersection pass after seam passes (0|1, default: 1)
-  --intersection_mask_half Inpaint square half-width at seam crossing (default: 10)
-  --intersection_write_half Radial writeback radius at seam crossing (default: 24)
-  --max_intersections Optional cap on processed intersections (default: 0=all)
-  --max_seams      Optional cap on processed seams (default: 0=all)
-  --seed           Seed base (default: 0; -1=random base)
-  --device         auto|cuda|mps|cpu (default: auto)
-
-Examples:
-  pnpm data:iso:seam:inpaint --run_id=tashkent_local_2026-02-09 \\
-    --tiles_dir=exports/iso_gmp_tiles/grid_5 --layer=sd \\
-    --model=stabilityai/stable-diffusion-xl-base-1.0 --lora=nerijs/pixel-art-xl --device=mps
+  --layer                  Input layer inside tiles_dir (default: sd_whitebox_seam)
+  --out_layer              Output layer inside tiles_dir (default: <layer>_global)
+  --lora                   Optional LoRA weights (HF repo id or local path)
+  --lora_scale             LoRA scale (default: 0.8)
+  --prompt                 Positive prompt (optional)
+  --negative               Negative prompt (optional)
+  --strength               Global img2img strength (default: 0.08)
+  --steps                  Inference steps for global pass (default: 12)
+  --guidance               CFG guidance for global pass (default: 4.2)
+  --tile_px                Window size for tiled global pass (default: 1024)
+  --tile_overlap_px        Window overlap in px (default: 256)
+  --tile_feather_px        Window feather in px (default: 128)
+  --intersection_pass      Extra intersection-conditioned pass on seam crossings (0|1, default: 1)
+  --intersection_half      Half-size of square patch around crossing (default: 120)
+  --intersection_boost     Extra strength added on intersections (default: 0.08)
+  --intersection_steps     Steps for intersection pass (default: 0 -> max(steps, 14))
+  --max_intersections      Optional cap on processed intersections (default: 0=all)
+  --seed                   Seed base (default: 0; -1=random)
+  --device                 auto|cuda|mps|cpu (default: auto)
 `);
 }
 
@@ -68,7 +62,7 @@ function ensureRelPath(p) {
 }
 
 function defaultOutLayer(layer) {
-  return `${layer}_seam`;
+  return `${layer}_global`;
 }
 
 function readNumber(args, keyA, keyB, fallback) {
@@ -76,29 +70,28 @@ function readNumber(args, keyA, keyB, fallback) {
   return Number.isFinite(v) ? v : fallback;
 }
 
-export async function seamInpaintTiles({
+export async function globalTiledDiffusionTiles({
   repoRoot,
   runId,
   model,
   tilesDirRel,
-  layer = 'sd',
+  layer = 'sd_whitebox_seam',
   outLayer = '',
   lora = '',
   loraScale = 0.8,
   prompt = '',
   negative = '',
-  strength = 0.2,
-  steps = 16,
-  guidance = 4.5,
-  seamContext = 0,
-  maskHalf = 16,
-  writeHalf = 20,
-  harmonizeHalf = 12,
+  strength = 0.08,
+  steps = 12,
+  guidance = 4.2,
+  tilePx = 1024,
+  tileOverlapPx = 256,
+  tileFeatherPx = 128,
   intersectionPass = 1,
-  intersectionMaskHalf = 10,
-  intersectionWriteHalf = 24,
+  intersectionHalf = 120,
+  intersectionBoost = 0.08,
+  intersectionSteps = 0,
   maxIntersections = 0,
-  maxSeams = 0,
   seed = 0,
   device = 'auto',
 }) {
@@ -121,6 +114,7 @@ export async function seamInpaintTiles({
   if (outLayerName === '.' || outLayerName === '..' || outLayerName.includes('..') || /^\d+$/.test(outLayerName)) {
     throw new Error(`Refusing reserved/unsafe --out_layer: ${outLayerName}`);
   }
+
   const outDirAbs = path.join(baseAbs, outLayerName);
   {
     const baseResolved = path.resolve(baseAbs);
@@ -148,8 +142,8 @@ export async function seamInpaintTiles({
     }
   }
 
-  const reportAbs = path.join(outDirAbs, 'seam_inpaint_report.json');
-  const scriptPath = path.join(repoRoot, 'packages', 'data', 'scripts', 'py', 'seam_inpaint_tiles.py');
+  const reportAbs = path.join(outDirAbs, 'global_tiled_diffusion_report.json');
+  const scriptPath = path.join(repoRoot, 'packages', 'data', 'scripts', 'py', 'diffusion_tiled_img2img.py');
   await runPython({
     repoRoot,
     scriptPath,
@@ -175,24 +169,22 @@ export async function seamInpaintTiles({
       String(steps),
       '--guidance',
       String(guidance),
-      '--seam_context',
-      String(seamContext),
-      '--mask_half',
-      String(maskHalf),
-      '--write_half',
-      String(writeHalf),
-      '--harmonize_half',
-      String(harmonizeHalf),
+      '--tile_px',
+      String(tilePx),
+      '--tile_overlap_px',
+      String(tileOverlapPx),
+      '--tile_feather_px',
+      String(tileFeatherPx),
       '--intersection_pass',
       String(intersectionPass),
-      '--intersection_mask_half',
-      String(intersectionMaskHalf),
-      '--intersection_write_half',
-      String(intersectionWriteHalf),
+      '--intersection_half',
+      String(intersectionHalf),
+      '--intersection_boost',
+      String(intersectionBoost),
+      '--intersection_steps',
+      String(intersectionSteps),
       '--max_intersections',
       String(maxIntersections),
-      '--max_seams',
-      String(maxSeams),
       '--seed',
       String(seed),
       '--device',
@@ -200,14 +192,12 @@ export async function seamInpaintTiles({
     ],
   });
 
-  if (!(await fileExists(reportAbs))) throw new Error(`Seam inpaint failed: missing report: ${reportAbs}`);
+  if (!(await fileExists(reportAbs))) throw new Error(`Global tiled diffusion failed: missing report: ${reportAbs}`);
   const report = JSON.parse(await fs.readFile(reportAbs, 'utf8'));
-  const seamsTotal = Number(report?.seams_total ?? 0);
-  const seamsProcessed = Number(report?.seams_processed ?? 0);
-  if (seamsTotal > 0 && (!Number.isFinite(seamsProcessed) || seamsProcessed <= 0)) {
-    throw new Error(
-      `Smoke check failed: expected seams_processed > 0 for seams_total=${String(seamsTotal)}, got: ${String(report?.seams_processed)}`,
-    );
+
+  const copied = Number(report?.tile_count_written ?? 0);
+  if (!Number.isFinite(copied) || copied <= 0) {
+    throw new Error(`Smoke check failed: expected tile_count_written > 0, got: ${String(report?.tile_count_written)}`);
   }
 
   await addFilesToManifest({ manifestPath, runRoot, absPaths: [reportAbs] });
@@ -218,13 +208,12 @@ export async function seamInpaintTiles({
     outLayer: outLayerName,
     overlap,
     reportRel: path.relative(runRoot, reportAbs).replaceAll('\\', '/'),
-    seamsTotal,
-    seamsProcessed,
-    seamsSkipped: Number(report?.seams_skipped ?? 0),
+    tileCountWritten: copied,
+    globalWindowsTotal: Number(report?.global_windows_total ?? 0),
+    globalWindowsProcessed: Number(report?.global_windows_processed ?? 0),
     intersectionsTotal: Number(report?.intersections_total ?? 0),
     intersectionsProcessed: Number(report?.intersections_processed ?? 0),
     intersectionsSkipped: Number(report?.intersections_skipped ?? 0),
-    suspiciousSeams: Array.isArray(report?.suspicious_seams) ? report.suspicious_seams.length : 0,
   };
 }
 
@@ -238,14 +227,14 @@ async function main() {
   const runId = typeof args.run_id === 'string' ? args.run_id : '';
   const model = typeof args.model === 'string' ? args.model : '';
   const tilesDirRel = ensureRelPath(typeof args.tiles_dir === 'string' ? args.tiles_dir : args.tilesDir) ?? '';
-  const layer = typeof args.layer === 'string' ? args.layer : 'sd';
+  const layer = typeof args.layer === 'string' ? args.layer : 'sd_whitebox_seam';
   const outLayer = typeof args.out_layer === 'string' ? args.out_layer : args.outLayer ?? '';
   const lora = typeof args.lora === 'string' ? args.lora : '';
 
   const repoRoot = (await findRepoRoot(process.cwd())) ?? process.cwd();
 
   try {
-    const result = await seamInpaintTiles({
+    const result = await globalTiledDiffusionTiles({
       repoRoot,
       runId,
       model,
@@ -256,18 +245,17 @@ async function main() {
       loraScale: readNumber(args, 'lora_scale', 'loraScale', 0.8),
       prompt: typeof args.prompt === 'string' ? args.prompt : '',
       negative: typeof args.negative === 'string' ? args.negative : '',
-      strength: readNumber(args, 'strength', 's', 0.2),
-      steps: readNumber(args, 'steps', 'n', 16),
-      guidance: readNumber(args, 'guidance', 'cfg', 4.5),
-      seamContext: readNumber(args, 'seam_context', 'seamContext', 0),
-      maskHalf: readNumber(args, 'mask_half', 'maskHalf', 16),
-      writeHalf: readNumber(args, 'write_half', 'writeHalf', 20),
-      harmonizeHalf: readNumber(args, 'harmonize_half', 'harmonizeHalf', 12),
+      strength: readNumber(args, 'strength', 's', 0.08),
+      steps: readNumber(args, 'steps', 'n', 12),
+      guidance: readNumber(args, 'guidance', 'cfg', 4.2),
+      tilePx: readNumber(args, 'tile_px', 'tilePx', 1024),
+      tileOverlapPx: readNumber(args, 'tile_overlap_px', 'tileOverlapPx', 256),
+      tileFeatherPx: readNumber(args, 'tile_feather_px', 'tileFeatherPx', 128),
       intersectionPass: readNumber(args, 'intersection_pass', 'intersectionPass', 1),
-      intersectionMaskHalf: readNumber(args, 'intersection_mask_half', 'intersectionMaskHalf', 10),
-      intersectionWriteHalf: readNumber(args, 'intersection_write_half', 'intersectionWriteHalf', 24),
+      intersectionHalf: readNumber(args, 'intersection_half', 'intersectionHalf', 120),
+      intersectionBoost: readNumber(args, 'intersection_boost', 'intersectionBoost', 0.08),
+      intersectionSteps: readNumber(args, 'intersection_steps', 'intersectionSteps', 0),
       maxIntersections: readNumber(args, 'max_intersections', 'maxIntersections', 0),
-      maxSeams: readNumber(args, 'max_seams', 'maxSeams', 0),
       seed: readNumber(args, 'seed', 'seed', 0),
       device: typeof args.device === 'string' ? args.device : 'auto',
     });

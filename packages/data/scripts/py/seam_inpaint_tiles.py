@@ -471,6 +471,7 @@ def _process_intersection(
     seam_context,
     intersection_mask_half,
     intersection_write_half,
+    harmonize_half,
     run_inpaint,
 ):
     tl_path = _tile_path(layer_dir, x_left, y_top)
@@ -565,6 +566,50 @@ def _process_intersection(
         corner="tl",
         radius=whalf,
     )
+
+    hhalf = max(0, min(int(harmonize_half), int(whalf)))
+    if hhalf > 0:
+        # Intersection writes back 4 corners last; re-harmonize around the crossing to avoid a visible seam-cross.
+        seam_left_x = int(w - mx - 1)
+        seam_right_x = int(mx)
+        seam_top_y = int(h - my - 1)
+        seam_bottom_y = int(my)
+        _harmonize_vertical_columns(
+            left=tl,
+            right=tr,
+            seam_left_x=seam_left_x,
+            seam_right_x=seam_right_x,
+            top=int(y0_t),
+            bottom=int(y1_t),
+            half=hhalf,
+        )
+        _harmonize_vertical_columns(
+            left=bl,
+            right=br,
+            seam_left_x=seam_left_x,
+            seam_right_x=seam_right_x,
+            top=int(y0_b),
+            bottom=int(y1_b),
+            half=hhalf,
+        )
+        _harmonize_horizontal_rows(
+            top_img=tl,
+            bottom_img=bl,
+            seam_top_y=seam_top_y,
+            seam_bottom_y=seam_bottom_y,
+            left=int(x0_l),
+            right=int(x1_l),
+            half=hhalf,
+        )
+        _harmonize_horizontal_rows(
+            top_img=tr,
+            bottom_img=br,
+            seam_top_y=seam_top_y,
+            seam_bottom_y=seam_bottom_y,
+            left=int(x0_r),
+            right=int(x1_r),
+            half=hhalf,
+        )
 
     tl.save(tl_path, "PNG")
     tr.save(tr_path, "PNG")
@@ -942,6 +987,7 @@ def main():
                     seam_context=seam_context,
                     intersection_mask_half=int(args.intersection_mask_half),
                     intersection_write_half=int(args.intersection_write_half),
+                    harmonize_half=int(args.harmonize_half),
                     run_inpaint=lambda patch, mask, idx=seam_idx: run_inpaint(patch, mask, idx),
                 )
                 seam_idx += 1
