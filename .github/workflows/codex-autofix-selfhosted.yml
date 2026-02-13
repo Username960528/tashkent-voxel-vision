@@ -681,16 +681,15 @@ jobs:
           echo "pushed=true" >> "$GITHUB_OUTPUT"
         env:
           DRY_RUN: ${{ steps.pr.outputs.dry_run }}
-
       - name: Request Codex rereview after autofix push
-        if: steps.pr.outputs.skip_run != 'true' && steps.commit.outputs.changes_applied == 'true' && steps.commit.outputs.pushed == 'true'
+        if: steps.pr.outputs.skip_run != 'true' && steps.commit.outputs.changes_applied == 'true' && steps.commit.outputs.pushed == 'true' && secrets.CODEX_REVIEW_TOKEN != ''
         uses: actions/github-script@v7
         env:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           REPO: ${{ steps.pr.outputs.repo }}
           NEW_SHA: ${{ steps.commit.outputs.new_sha }}
         with:
-          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN }}
           script: |
             const prNumber = Number(process.env.PR_NUMBER || 0);
             const repoFull = String(process.env.REPO || '');

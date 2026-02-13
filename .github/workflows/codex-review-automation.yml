@@ -425,9 +425,10 @@ jobs:
           CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
 
       - name: Comment @codex review on open/sync
+        if: steps.token.outputs.present == 'true'
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || github.token }}
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN }}
           script: |
             const action = context.payload.action;
             const allowed = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review']);
@@ -511,9 +512,10 @@ jobs:
           CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
 
       - name: Comment @codex address that feedback when autofix/remote is added
+        if: steps.token.outputs.present == 'true'
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || github.token }}
+          github-token: ${{ secrets.CODEX_REVIEW_TOKEN }}
           script: |
             const label = context.payload.label?.name;
             if (label !== 'autofix/remote') {
