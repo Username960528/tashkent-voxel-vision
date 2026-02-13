@@ -16,6 +16,7 @@
     "manifest:validate": "node scripts/manifest-validate.mjs",
     "release:init": "node scripts/release-init.mjs",
     "osm:fetch": "node scripts/osm-fetch.mjs",
+    "iso:vertex:nbpro": "node scripts/iso-vertex-nbpro.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }
