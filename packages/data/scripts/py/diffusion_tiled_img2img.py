@@ -49,6 +49,16 @@ def _crop_margin_px(size_px, overlap):
     return int(round(size_px * frac))
 
 
+def _min_steps_for_strength(strength):
+    s = float(max(1e-6, strength))
+    return int(max(1, math.ceil(1.0 / s)))
+
+
+def _effective_steps(requested_steps, strength):
+    req = int(max(1, requested_steps))
+    return int(max(req, _min_steps_for_strength(strength)))
+
+
 def _find_index_sets(in_dir):
     z0 = os.path.join(in_dir, "0")
     if not os.path.isdir(z0):
@@ -118,7 +128,7 @@ def _window_weight(width, height, fade_px, has_left, has_right, has_top, has_bot
     return wy[:, None] * wx[None, :]
 
 
-def _radial_mask(width, height):
+def _intersection_mask(width, height):
     if width <= 0 or height <= 0:
         return None
     cx = (float(width) - 1.0) * 0.5
@@ -420,6 +430,9 @@ def main():
     accum = np.zeros_like(base_arr, dtype=np.float32)
     wsum = np.zeros((mh, mw, 1), dtype=np.float32)
 
+    steps_requested = int(args.steps)
+    steps_effective = _effective_steps(steps_requested, float(args.strength))
+
     global_windows_total = int(len(x_starts) * len(y_starts))
     global_windows_processed = 0
     global_windows_skipped = 0
@@ -441,7 +454,7 @@ def main():
                 prompt=args.prompt,
                 negative=args.negative,
                 strength=float(args.strength),
-                steps=int(args.steps),
+                steps=steps_effective,
                 guidance=float(args.guidance),
                 generator=generator,
                 cross_attention_kwargs=cross_attention_kwargs,
@@ -480,14 +493,14 @@ def main():
     intersections_processed = 0
     intersections_skipped = 0
     run_intersection_pass = bool(int(args.intersection_pass))
+    i_steps_requested = int(args.intersection_steps) if int(args.intersection_steps) > 0 else int(max(steps_requested, 14))
+    i_strength = float(min(1.0, max(0.01, float(args.strength) + float(args.intersection_boost))))
+    i_steps_effective = _effective_steps(i_steps_requested, i_strength)
 
     if run_intersection_pass and intersections_total > 0:
         centers = [(sx, sy) for sy in seam_y_vals for sx in seam_x_vals]
         if args.max_intersections and args.max_intersections > 0:
             centers = centers[: int(args.max_intersections)]
-
-        i_steps = int(args.intersection_steps) if int(args.intersection_steps) > 0 else int(max(args.steps, 14))
-        i_strength = float(min(1.0, max(0.01, float(args.strength) + float(args.intersection_boost))))
 
         for idx, (cx, cy) in enumerate(centers):
             half = int(max(8, args.intersection_half))
@@ -509,13 +522,13 @@ def main():
                 prompt=args.prompt,
                 negative=args.negative,
                 strength=i_strength,
-                steps=i_steps,
+                steps=i_steps_effective,
                 guidance=float(args.guidance),
                 generator=generator,
                 cross_attention_kwargs=cross_attention_kwargs,
             )
 
-            mask = _radial_mask(pw, ph)
+            mask = _intersection_mask(pw, ph)
             if mask is None:
                 intersections_skipped += 1
                 continue
@@ -553,6 +566,8 @@ def main():
         "negative": args.negative,
         "strength": float(args.strength),
         "steps": int(args.steps),
+        "steps_requested": int(steps_requested),
+        "steps_effective": int(steps_effective),
         "guidance": float(args.guidance),
         "seed_base": int(seed_base),
         "device": device,
@@ -583,6 +598,8 @@ def main():
         "intersection_half": int(args.intersection_half),
         "intersection_boost": float(args.intersection_boost),
         "intersection_steps": int(args.intersection_steps),
+        "intersection_steps_requested": int(i_steps_requested),
+        "intersection_steps_effective": int(i_steps_effective),
         "duration_s": float(dt),
     }
 
@@ -604,6 +621,8 @@ def main():
                 "tile_count_written": int(tile_count_written),
                 "global_windows_processed": int(global_windows_processed),
                 "intersections_processed": int(intersections_processed),
+                "steps_effective": int(steps_effective),
+                "intersection_steps_effective": int(i_steps_effective),
                 "duration_s": float(dt),
             },
             separators=(",", ":"),
