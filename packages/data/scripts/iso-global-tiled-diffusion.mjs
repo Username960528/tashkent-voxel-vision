@@ -111,8 +111,22 @@ export async function globalTiledDiffusionTiles({
   const outLayerName = outLayer || defaultOutLayer(layer);
   if (!/^[a-zA-Z0-9._-]+$/.test(outLayerName)) throw new Error(`Invalid --out_layer: ${outLayerName}`);
   if (outLayerName === layer) throw new Error('--out_layer must be different from --layer');
+  if (outLayerName === '.' || outLayerName === '..' || outLayerName.includes('..') || /^\d+$/.test(outLayerName)) {
+    throw new Error(`Refusing reserved/unsafe --out_layer: ${outLayerName}`);
+  }
 
   const outDirAbs = path.join(baseAbs, outLayerName);
+  {
+    const baseResolved = path.resolve(baseAbs);
+    const outResolved = path.resolve(outDirAbs);
+    if (outResolved === baseResolved || !outResolved.startsWith(`${baseResolved}${path.sep}`)) {
+      throw new Error(`Refusing unsafe out dir (not under tiles_dir): ${outDirAbs}`);
+    }
+  }
+  if (await fileExists(outDirAbs)) {
+    const st = await fs.stat(outDirAbs);
+    if (!st.isDirectory()) throw new Error(`Refusing to delete non-directory out_layer path: ${outDirAbs}`);
+  }
   await fs.rm(outDirAbs, { recursive: true, force: true });
   await fs.mkdir(outDirAbs, { recursive: true });
 

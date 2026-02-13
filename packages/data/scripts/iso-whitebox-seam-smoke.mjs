@@ -319,13 +319,12 @@ export async function runIsoWhiteboxSeamSmoke({
     finalSdLayer = finalGlobalLayer;
   }
 
-  const pixelLayer = useGlobalPass ? pixelLayerGlobal : pixelLayerSeam;
-  const pixelMosaicOut = useGlobalPass ? pixelMosaicOutGlobal : pixelMosaicOutSeam;
-  const pixel = await stylizePixelDir({
+  // Always generate the seam pixel artifact, even when global pass is enabled, so downstream reports can compare.
+  const pixelSeam = await stylizePixelDir({
     repoRoot,
     runId,
-    inDirRel: `${tilesDirRel}/${finalSdLayer}`,
-    outDirRel: `${tilesDirRel}/${pixelLayer}`,
+    inDirRel: `${tilesDirRel}/${seamLayer}`,
+    outDirRel: `${tilesDirRel}/${pixelLayerSeam}`,
     pixelScale: 0.22,
     palette: 64,
     dither: true,
@@ -334,16 +333,45 @@ export async function runIsoWhiteboxSeamSmoke({
     edgeThickness: 1,
     maxImages,
   });
-
-  const pixelMosaic = await buildIsoMosaic({
+  const pixelMosaicSeam = await buildIsoMosaic({
     repoRoot,
     runId,
     tilesDirRel,
-    layer: pixelLayer,
+    layer: pixelLayerSeam,
     mode: seamMosaicMode,
     featherPx: seamMosaicFeather,
-    outRel: pixelMosaicOut,
+    outRel: pixelMosaicOutSeam,
   });
+
+  const pixelLayer = useGlobalPass ? pixelLayerGlobal : pixelLayerSeam;
+  let pixel = pixelSeam;
+  let pixelMosaic = pixelMosaicSeam;
+
+  if (useGlobalPass) {
+    pixel = await stylizePixelDir({
+      repoRoot,
+      runId,
+      inDirRel: `${tilesDirRel}/${finalSdLayer}`,
+      outDirRel: `${tilesDirRel}/${pixelLayerGlobal}`,
+      pixelScale: 0.22,
+      palette: 64,
+      dither: true,
+      edgeThreshold: 112,
+      edgeAlpha: 0.28,
+      edgeThickness: 1,
+      maxImages,
+    });
+
+    pixelMosaic = await buildIsoMosaic({
+      repoRoot,
+      runId,
+      tilesDirRel,
+      layer: pixelLayerGlobal,
+      mode: seamMosaicMode,
+      featherPx: seamMosaicFeather,
+      outRel: pixelMosaicOutGlobal,
+    });
+  }
 
   const seamReportAbs = path.join(runRoot, seam.reportRel);
   const seamReport = JSON.parse(await fs.readFile(seamReportAbs, 'utf8'));
@@ -383,7 +411,7 @@ export async function runIsoWhiteboxSeamSmoke({
       mosaic_sd_whitebox: sdMosaic.outRel,
       mosaic_sd_whitebox_seam: seamMosaic.outRel,
       mosaic_sd_whitebox_seam_global: globalMosaic?.outRel ?? null,
-      mosaic_pixel_whitebox_seam: pixelMosaic.outRel,
+      mosaic_pixel_whitebox_seam: pixelMosaicSeam.outRel,
       mosaic_pixel_whitebox_seam_global: useGlobalPass ? pixelMosaic.outRel : null,
       global_final_layer: finalSdLayer,
       pixel_input_layer: finalSdLayer,
