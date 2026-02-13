@@ -178,12 +178,16 @@ def _run_patch(pipe, patch, *, prompt, negative, strength, steps, guidance, gene
 def _build_cropped_mosaic(in_dir, x_vals, y_vals, w, h, mx, my):
     cw = max(1, w - 2 * mx)
     ch = max(1, h - 2 * my)
-    canvas = Image.new("RGB", (cw * len(x_vals), ch * len(y_vals)), "#ffffff")
+    x0 = int(min(x_vals))
+    y0 = int(min(y_vals))
+    span_x = int(max(x_vals)) - x0 + 1
+    span_y = int(max(y_vals)) - y0 + 1
+    canvas = Image.new("RGB", (cw * span_x, ch * span_y), "#ffffff")
 
     missing = 0
     copied = 0
-    for iy, y in enumerate(y_vals):
-        for ix, x in enumerate(x_vals):
+    for y in y_vals:
+        for x in x_vals:
             tile_path = os.path.join(in_dir, "0", str(x), f"{y}.png")
             if not os.path.exists(tile_path):
                 missing += 1
@@ -193,16 +197,18 @@ def _build_cropped_mosaic(in_dir, x_vals, y_vals, w, h, mx, my):
                 crop = tile.crop((mx, my, w - mx, h - my))
             else:
                 crop = tile
-            canvas.paste(crop, (ix * cw, iy * ch))
+            canvas.paste(crop, ((int(x) - x0) * cw, (int(y) - y0) * ch))
             copied += 1
     return canvas, copied, missing, cw, ch
 
 
 def _write_back_tiles(in_dir, out_dir, mosaic_out, x_vals, y_vals, w, h, mx, my, cw, ch):
+    x0 = int(min(x_vals))
+    y0 = int(min(y_vals))
     written = 0
     missing = 0
-    for iy, y in enumerate(y_vals):
-        for ix, x in enumerate(x_vals):
+    for y in y_vals:
+        for x in x_vals:
             in_tile = os.path.join(in_dir, "0", str(x), f"{y}.png")
             if not os.path.exists(in_tile):
                 missing += 1
@@ -211,7 +217,9 @@ def _write_back_tiles(in_dir, out_dir, mosaic_out, x_vals, y_vals, w, h, mx, my,
             _ensure_dir(os.path.dirname(os.path.abspath(out_tile)))
 
             tile = _safe_open_tile(in_tile, (w, h), "RGB")
-            patch = mosaic_out.crop((ix * cw, iy * ch, (ix + 1) * cw, (iy + 1) * ch))
+            dx = int(x) - x0
+            dy = int(y) - y0
+            patch = mosaic_out.crop((dx * cw, dy * ch, (dx + 1) * cw, (dy + 1) * ch))
             tile.paste(patch, (mx, my))
             tile.save(out_tile, "PNG")
             written += 1
@@ -294,6 +302,10 @@ def main():
         raise SystemExit("--tile_overlap_px must be < --tile_px")
     if args.tile_feather_px < 0:
         raise SystemExit("--tile_feather_px must be >= 0")
+    if args.tile_feather_px > args.tile_overlap_px:
+        # Feathering is only valid inside the overlap region; otherwise we can create
+        # zero-weight boundary pixels and leave visible stripes from the base mosaic.
+        args.tile_feather_px = int(args.tile_overlap_px)
     if args.intersection_pass not in (0, 1):
         raise SystemExit("--intersection_pass must be 0 or 1")
     if args.intersection_half <= 0:
@@ -487,8 +499,12 @@ def main():
     out_arr[covered] = accum[covered] / wsum[:, :, :][covered]
     mosaic_out = Image.fromarray(np.clip(out_arr, 0, 255).astype(np.uint8), mode="RGB")
 
-    seam_x_vals = [i * cw for i in range(1, grid_x)]
-    seam_y_vals = [i * ch for i in range(1, grid_y)]
+    x0 = int(min(x_vals))
+    y0 = int(min(y_vals))
+    x_set = set(int(v) for v in x_vals)
+    y_set = set(int(v) for v in y_vals)
+    seam_x_vals = [((int(x) - x0 + 1) * cw) for x in x_vals if (int(x) + 1) in x_set]
+    seam_y_vals = [((int(y) - y0 + 1) * ch) for y in y_vals if (int(y) + 1) in y_set]
     intersections_total = int(len(seam_x_vals) * len(seam_y_vals))
     intersections_processed = 0
     intersections_skipped = 0
