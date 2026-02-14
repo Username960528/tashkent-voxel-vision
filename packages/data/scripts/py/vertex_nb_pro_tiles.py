@@ -12,9 +12,18 @@ import time
 import urllib.error
 import urllib.request
 
+import numpy as np
 from PIL import Image
 
-from seam_score import load_rgb, score_candidate_against_neighbors, score_pair, seam_line_rgb_l1_per_col, seam_line_rgb_l1_per_row, sha256_file
+from seam_score import (
+    load_rgb,
+    normalize_weights,
+    score_candidate_against_neighbors,
+    score_pair,
+    seam_line_rgb_l1_per_col,
+    seam_line_rgb_l1_per_row,
+    sha256_file,
+)
 
 
 def _ensure_dir(p):
@@ -245,6 +254,23 @@ def _crop_margin_px(size_px, overlap):
     return int(round(size_px * frac))
 
 
+def _resize_rgb_array(rgb, *, out_size):
+    # rgb: float32 in [0, 1], shape (H, W, 3)
+    if rgb is None:
+        return None
+    out_w, out_h = (int(out_size[0]), int(out_size[1]))
+    if out_w <= 0 or out_h <= 0:
+        raise ValueError("out_size must be positive")
+    h, w, c = rgb.shape
+    if c != 3:
+        raise ValueError("expected 3-channel RGB")
+    if w == out_w and h == out_h:
+        return rgb
+    img = Image.fromarray(np.clip(rgb * 255.0, 0.0, 255.0).astype(np.uint8), mode="RGB")
+    img = img.resize((out_w, out_h), resample=Image.Resampling.LANCZOS)
+    return (np.asarray(img, dtype=np.float32) / 255.0).astype(np.float32)
+
+
 def _colormap_hot(t):
     t = float(max(0.0, min(1.0, t)))
     if t < 0.5:
@@ -301,6 +327,10 @@ def main():
 
     ap.add_argument("--overlap_px", type=int, default=48)
     ap.add_argument("--score_weights", default="")
+    ap.add_argument("--structure_weight", type=float, default=0.75)
+    ap.add_argument("--structure_downscale_px", type=int, default=128)
+    ap.add_argument("--structure_weights", default="")
+    ap.add_argument("--fallback_penalty", type=float, default=0.05)
 
     ap.add_argument("--cache_dir", default=".cache/vertex_nb_pro")
     ap.add_argument("--force", type=int, default=0)
@@ -333,6 +363,12 @@ def main():
         raise SystemExit("--k must be > 0")
     if args.overlap_px <= 0:
         raise SystemExit("--overlap_px must be > 0")
+    if args.structure_downscale_px <= 0:
+        raise SystemExit("--structure_downscale_px must be > 0")
+    if not math.isfinite(float(args.structure_weight)) or float(args.structure_weight) < 0.0:
+        raise SystemExit("--structure_weight must be >= 0")
+    if not math.isfinite(float(args.fallback_penalty)) or float(args.fallback_penalty) < 0.0:
+        raise SystemExit("--fallback_penalty must be >= 0")
 
     anchor_paths = [p.strip() for p in str(args.anchors).split(",") if p.strip()]
     if len(anchor_paths) < 3 or len(anchor_paths) > 6:
@@ -347,15 +383,34 @@ def main():
     prompt_hash = _sha256_text(prompt_text)
     negative_hash = _sha256_text(negative_text) if negative_text else ""
 
-    weights = None
+    seam_weights = None
     if args.score_weights:
         raw = str(args.score_weights).strip()
         if raw.startswith("{"):
-            weights = json.loads(raw)
+            seam_weights = json.loads(raw)
         elif os.path.isfile(raw):
-            weights = json.loads(_read_text(raw))
+            seam_weights = json.loads(_read_text(raw))
         else:
             raise SystemExit(f"--score_weights must be a JSON string or existing file path: {raw}")
+    seam_weights_norm = normalize_weights(seam_weights)
+
+    structure_weights_raw = None
+    if args.structure_weights:
+        raw = str(args.structure_weights).strip()
+        if raw.startswith("{"):
+            structure_weights_raw = json.loads(raw)
+        elif os.path.isfile(raw):
+            structure_weights_raw = json.loads(_read_text(raw))
+        else:
+            raise SystemExit(f"--structure_weights must be a JSON string or existing file path: {raw}")
+    structure_weights_norm = normalize_weights(
+        structure_weights_raw,
+        default={"rgb_l1": 0.15, "rgb_l2": 0.0, "sobel_l1": 1.0},
+    )
+
+    structure_weight = float(args.structure_weight)
+    structure_downscale_px = int(args.structure_downscale_px)
+    fallback_penalty = float(args.fallback_penalty)
 
     vertex_project = str(args.vertex_project or "").strip() or str(os.environ.get("VERTEX_PROJECT") or "").strip()
     vertex_location = str(args.vertex_location or "").strip() or str(os.environ.get("VERTEX_LOCATION") or "global").strip()
@@ -415,7 +470,11 @@ def main():
         "prompt_hash": prompt_hash,
         "negative_hash": negative_hash,
         "anchors_sha256": anchors_hashes,
-        "score_weights": weights,
+        "score_weights": seam_weights_norm,
+        "structure_weight": structure_weight,
+        "structure_downscale_px": structure_downscale_px,
+        "structure_weights": structure_weights_norm,
+        "fallback_penalty": fallback_penalty,
     }
     run_config_hash = _sha256_text(json.dumps(run_config, sort_keys=True))
     if os.path.isfile(config_path):
@@ -488,6 +547,13 @@ def main():
 
             # Include the input tile hash in cache keys so cache is safe across runs/updates.
             tile_in_hash = sha256_file(tile_in)
+            tile_in_rgb, _ = load_rgb(tile_in, target_size=target_size)
+            tile_in_rgb_struct = None
+            if structure_weight > 0.0:
+                tile_in_rgb_struct = _resize_rgb_array(
+                    tile_in_rgb,
+                    out_size=(structure_downscale_px, structure_downscale_px),
+                )
 
             neighbors = {}
             if int(args.use_neighbors):
@@ -518,8 +584,12 @@ def main():
                 tl_rgb, _ = load_rgb(neighbors["tl"], target_size=target_size)
 
             best = None
-            best_score = None
+            best_total_score = None
             best_seed = None
+            best_seam_score = None
+            best_structure_score = None
+            best_model_used = None
+            best_fallback_penalty = 0.0
 
             for vi in range(int(args.k)):
                 seed = _pick_seed(args.seed_mode, args.seed_base, x, y, vi)
@@ -672,16 +742,42 @@ def main():
                         top_rgb=top_rgb,
                         tl_rgb=tl_rgb,
                         overlap_px=args.overlap_px,
-                        weights=weights,
+                        weights=seam_weights_norm,
                         neighbor_mode=args.neighbor_mode,
                     )
-                    cand_entry["seam_score"] = float(s_total)
+                    seam_score = float(s_total)
+                    cand_entry["seam_score"] = seam_score
                     cand_entry["metrics"] = s_seams
 
-                    if best_score is None or s_total < best_score:
-                        best_score = float(s_total)
+                    structure_score = 0.0
+                    structure_metrics = None
+                    if structure_weight > 0.0 and tile_in_rgb_struct is not None:
+                        cand_rgb_struct = _resize_rgb_array(
+                            cand_rgb,
+                            out_size=(structure_downscale_px, structure_downscale_px),
+                        )
+                        structure_score, structure_metrics = score_pair(
+                            tile_in_rgb_struct,
+                            cand_rgb_struct,
+                            weights=structure_weights_norm,
+                        )
+                    cand_entry["structure_score"] = float(structure_score) if structure_weight > 0.0 else None
+                    cand_entry["structure_metrics"] = structure_metrics
+
+                    applied_fallback_penalty = fallback_penalty if used_model != model else 0.0
+                    cand_entry["fallback_penalty"] = float(applied_fallback_penalty)
+
+                    total_score = seam_score + structure_weight * float(structure_score) + float(applied_fallback_penalty)
+                    cand_entry["total_score"] = float(total_score)
+
+                    if best_total_score is None or total_score < best_total_score:
+                        best_total_score = float(total_score)
                         best = cand_png
                         best_seed = int(seed)
+                        best_seam_score = float(seam_score)
+                        best_structure_score = float(structure_score) if structure_weight > 0.0 else None
+                        best_model_used = used_model
+                        best_fallback_penalty = float(applied_fallback_penalty)
 
                 tile_entry["candidates"].append(cand_entry)
 
@@ -697,7 +793,11 @@ def main():
             tile_entry["selected"] = {
                 "seed": int(best_seed) if best_seed is not None else None,
                 "path": _relpath_if_under(run_root, tile_out),
-                "seam_score": float(best_score),
+                "total_score": float(best_total_score) if best_total_score is not None else None,
+                "seam_score": float(best_seam_score) if best_seam_score is not None else None,
+                "structure_score": float(best_structure_score) if best_structure_score is not None else None,
+                "model_used": best_model_used,
+                "fallback_penalty": float(best_fallback_penalty),
                 "cached": False,
             }
             tiles_report.append(tile_entry)
@@ -747,7 +847,7 @@ def main():
             wop = int(min(args.overlap_px, target_size[0]))
             a_strip = a[:, target_size[0] - wop : target_size[0], :]
             b_strip = b[:, 0:wop, :]
-            s, _m = score_pair(a_strip, b_strip, weights=weights)
+            s, _m = score_pair(a_strip, b_strip, weights=seam_weights_norm)
             worst.append({"type": "vertical", "coordA": {"x": x, "y": y}, "coordB": {"x": x + 1, "y": y}, "score": float(s)})
             seam_scores.append(float(s))
 
@@ -772,7 +872,7 @@ def main():
             hop = int(min(args.overlap_px, target_size[1]))
             a_strip = a[target_size[1] - hop : target_size[1], :, :]
             b_strip = b[0:hop, :, :]
-            s, _m = score_pair(a_strip, b_strip, weights=weights)
+            s, _m = score_pair(a_strip, b_strip, weights=seam_weights_norm)
             worst.append({"type": "horizontal", "coordA": {"x": x, "y": y}, "coordB": {"x": x, "y": y + 1}, "score": float(s)})
             seam_scores.append(float(s))
 
@@ -830,7 +930,13 @@ def main():
         "anchors": anchors_info,
         "prompt_file": _relpath_if_under(run_root, args.prompt_file),
         "negative_prompt_file": _relpath_if_under(run_root, args.negative_prompt_file) if args.negative_prompt_file else None,
-        "score_weights": weights,
+        "score_weights": seam_weights_norm,
+        "structure": {
+            "weight": float(structure_weight),
+            "downscale_px": int(structure_downscale_px),
+            "weights": structure_weights_norm,
+        },
+        "fallback_penalty": float(fallback_penalty),
         "tiles": tiles_report,
         "seams_summary": {
             "worst_seams": worst[:10],
