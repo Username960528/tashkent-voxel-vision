@@ -28,6 +28,7 @@
     "data:iso:stylize:diffusion:dir": "node packages/data/scripts/iso-stylize-diffusion-dir.mjs",
     "data:iso:stylize:diffusion:tiled": "node packages/data/scripts/iso-global-tiled-diffusion.mjs",
     "data:iso:stylize:pixel:dir": "node packages/data/scripts/iso-stylize-pixel-dir.mjs",
+    "data:iso:vertex:nbpro": "node packages/data/scripts/iso-vertex-nbpro.mjs",
     "data:iso:seam:inpaint": "node packages/data/scripts/iso-seam-inpaint.mjs",
     "data:iso:whitebox:seam:smoke": "node packages/data/scripts/iso-whitebox-seam-smoke.mjs",
     "data:iso:mosaic": "node packages/data/scripts/iso-tile-mosaic.mjs",
