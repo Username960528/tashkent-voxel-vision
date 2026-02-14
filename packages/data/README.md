@@ -93,7 +93,8 @@ pnpm data:image:batch \
 # - If gemini-3-pro-image-preview returns 429 (Resource exhausted), keep fallback_model enabled
 
 # Vertex Nano Banana Pro 4x4 pilot (tile-conditioned + seam scoring)
-# - Generates K candidates per tile, scores seams vs already accepted neighbors, selects best
+# - Generates K candidates per tile
+# - Scores seams vs already accepted neighbors + structure-fidelity vs input tile, selects best
 # - Outputs under exports/iso_nb_pro/: tiles/ + mosaic_nb_pro.png + report_nb_pro.json + seam_heatmap_nb_pro.png
 pnpm data:iso:vertex:nbpro \
   --run_id=tashkent_2026-02-07 \
@@ -105,7 +106,8 @@ pnpm data:iso:vertex:nbpro \
   --fallback_model=gemini-2.5-flash-image \
   --anchors_dir=exports/anchors/nbpro \
   --prompt_file=exports/prompts/nbpro.txt \
-  --k=4 --overlap_px=48 --neighbor_mode=left+top
+  --k=4 --overlap_px=48 --neighbor_mode=left+top \
+  --structure_weight=0.75 --fallback_penalty=0.05
 
 # Stitch a quick mosaic for visual QA (optional)
 pnpm data:iso:mosaic --run_id=tashkent_2026-02-07 --tiles_dir=exports/iso_gmp_tiles/grid_3 --layer=pixel
