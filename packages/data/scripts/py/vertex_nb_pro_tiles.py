@@ -418,6 +418,9 @@ def main():
                 tiles_report.append(tile_entry)
                 continue
 
+            # Include the input tile hash in cache keys so cache is safe across runs/updates.
+            tile_in_hash = sha256_file(tile_in)
+
             neighbors = {}
             if int(args.use_neighbors):
                 if "left" in args.neighbor_mode and x > args.x0 and (x - 1, y) in selected:
@@ -459,6 +462,7 @@ def main():
                     "neighbors": neighbor_hashes,
                     "x": int(x),
                     "y": int(y),
+                    "tile_in_sha256": tile_in_hash,
                     "seed": int(seed),
                     "cfg": cfg,
                     "neighbor_mode": str(args.neighbor_mode),
