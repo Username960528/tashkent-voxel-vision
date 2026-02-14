@@ -323,7 +323,9 @@ export async function runIsoVertexNbpro({
 
 async function main() {
   const { args } = parseArgs(process.argv.slice(2));
-  if (args.help || args.h) {
+  // parseArgs() treats `--h=<value>` as `args.h`, so don't use `args.h` for help.
+  // Only `--help` is supported.
+  if (args.help) {
     printHelp();
     process.exit(0);
   }
