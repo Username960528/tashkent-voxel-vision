@@ -377,6 +377,18 @@ def main():
     _ensure_dir(out_tiles_dir)
     _ensure_dir(out_candidates_dir)
 
+    # Copy tilejson.json for downstream mosaic tool (expects overlap in out_dir/tilejson.json).
+    src_tilejson = os.path.join(tiles_dir, "tilejson.json")
+    if os.path.isfile(src_tilejson):
+        shutil.copyfile(src_tilejson, os.path.join(out_dir, "tilejson.json"))
+
+    anchors_info = []
+    anchors_hashes = []
+    for p in anchor_paths:
+        h = sha256_file(p)
+        anchors_hashes.append(h)
+        anchors_info.append({"path": _relpath_if_under(run_root, p), "sha256": h})
+
     # Guard against accidentally reusing an out_dir from a different config, which would silently
     # mix old tiles with new ones due to idempotent "skip if exists" behavior.
     config_path = os.path.join(out_dir, "config_nb_pro.json")
@@ -411,7 +423,6 @@ def main():
             existing = _read_json(config_path)
             existing_hash = str(existing.get("config_hash") or "").strip()
         except Exception:
-            existing = None
             existing_hash = ""
         if existing_hash and existing_hash != run_config_hash and not int(args.force):
             raise SystemExit(
@@ -423,18 +434,6 @@ def main():
             )
     if (not os.path.isfile(config_path)) or int(args.force):
         _write_json(config_path, {"config_hash": run_config_hash, "config": run_config})
-
-    # Copy tilejson.json for downstream mosaic tool (expects overlap in out_dir/tilejson.json).
-    src_tilejson = os.path.join(tiles_dir, "tilejson.json")
-    if os.path.isfile(src_tilejson):
-        shutil.copyfile(src_tilejson, os.path.join(out_dir, "tilejson.json"))
-
-    anchors_info = []
-    anchors_hashes = []
-    for p in anchor_paths:
-        h = sha256_file(p)
-        anchors_hashes.append(h)
-        anchors_info.append({"path": _relpath_if_under(run_root, p), "sha256": h})
 
     # Determine target output size from first input tile.
     sample_in = os.path.join(tiles_dir, args.layer, "0", str(args.x0), f"{args.y0}.png")
