@@ -212,7 +212,7 @@ export async function runIsoVertexNbpro({
   }
 
   const scriptPath = path.join(repoRoot, 'packages', 'data', 'scripts', 'py', 'vertex_nb_pro_tiles.py');
-  runPython({
+  await runPython({
     repoRoot,
     scriptPath,
     args: [
@@ -291,11 +291,12 @@ export async function runIsoVertexNbpro({
   const heatmapAbs = path.join(outBaseAbs, 'seam_heatmap_nb_pro.png');
   const reportExists = await fileExists(reportAbs);
   const heatmapExists = await fileExists(heatmapAbs);
+  const tilejsonExists = await fileExists(tilejsonOutAbs);
 
   await addFilesToManifest({
     manifestPath,
     runRoot,
-    absPaths: [reportExists ? reportAbs : null, heatmapExists ? heatmapAbs : null, tilejsonOutAbs].filter(Boolean),
+    absPaths: [reportExists ? reportAbs : null, heatmapExists ? heatmapAbs : null, tilejsonExists ? tilejsonOutAbs : null].filter(Boolean),
   });
 
   if (!['crop', 'blend'].includes(mosaicMode)) throw new Error(`Invalid --mosaic_mode: ${String(mosaicMode)}`);
@@ -397,4 +398,3 @@ const isEntrypoint = (() => {
 if (isEntrypoint) {
   await main();
 }
-
