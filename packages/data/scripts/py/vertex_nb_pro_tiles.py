@@ -349,8 +349,6 @@ def main():
     model = str(args.model).strip()
     fallback_model = str(args.fallback_model or "").strip()
 
-    access_token = _get_vertex_access_token()
-
     cfg = {
         "temperature": float(args.temperature),
         "top_p": float(args.top_p),
@@ -382,8 +380,9 @@ def main():
     sample_in = os.path.join(tiles_dir, args.layer, "0", str(args.x0), f"{args.y0}.png")
     if not os.path.isfile(sample_in):
         raise SystemExit(f"missing input tile: {sample_in}")
-    sample_img = Image.open(sample_in).convert("RGB")
-    target_size = sample_img.size
+    with Image.open(sample_in) as _sample_src:
+        sample_img = _sample_src.convert("RGB")
+        target_size = sample_img.size
 
     selected = {}  # (x,y) -> abs path
     selected_sha = {}  # (x,y) -> sha256
@@ -540,7 +539,8 @@ def main():
                         return _post_json_with_retries(
                             url,
                             payload,
-                            access_token=access_token,
+                            # Long runs can exceed the lifetime of a single access token; re-fetch per request.
+                            access_token=_get_vertex_access_token(),
                             timeout_ms=args.timeout_ms,
                             retry_max=args.retry_max,
                             retry_base_ms=args.retry_base_ms,
