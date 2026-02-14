@@ -120,6 +120,15 @@ function toFiniteFloat(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function normalizeInt32Seed(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  // Vertex validates seed strictly as int32 in some projects; keep a safe non-negative range.
+  // Use bitmask to avoid out-of-range errors while preserving deterministic wrapping.
+  return Math.floor(n) & 0x7fffffff;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -521,17 +530,19 @@ export async function generateImageBatch({
 
       try {
         const outputs = [];
+        const failures = [];
         let usedModel = model;
         const variantCount = requestedCandidateCount;
-        const baseSeed = Number.isFinite(seed) ? Math.floor(seed) : null;
+        const baseSeed = normalizeInt32Seed(seed);
 
         for (let variantIndex = 0; variantIndex < variantCount; variantIndex++) {
           const generationConfig = { ...generationConfigBase };
-          if (Number.isFinite(baseSeed)) {
-            generationConfig.seed = baseSeed + variantIndex;
-          }
+          const variantSeed = Number.isFinite(baseSeed) ? normalizeInt32Seed(baseSeed + variantIndex) : null;
+          if (Number.isFinite(variantSeed)) generationConfig.seed = variantSeed;
 
           let images = null;
+          let variantModel = model;
+          let errorMessage = '';
           try {
             images = await generateImageWithPrompt({
               backend,
@@ -553,37 +564,56 @@ export async function generateImageBatch({
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             if (fallbackModel && fallbackModel !== model && !message.includes('Prompt blocked')) {
-              usedModel = fallbackModel;
-              images = await generateImageWithPrompt({
-                backend,
-                model: fallbackModel,
-                prompt: renderPrompt,
-                generationConfig,
-                timeoutMs,
-                retryMax,
-                retryBaseMs,
-                retryMaxMs,
-                retryJitterMs,
-                debugRetries,
-                geminiApiKey,
-                vertexProject,
-                vertexLocation,
-                vertexAccessToken,
-                purpose: 'image_generate_fallback',
-              });
+              variantModel = fallbackModel;
+              try {
+                images = await generateImageWithPrompt({
+                  backend,
+                  model: fallbackModel,
+                  prompt: renderPrompt,
+                  generationConfig,
+                  timeoutMs,
+                  retryMax,
+                  retryBaseMs,
+                  retryMaxMs,
+                  retryJitterMs,
+                  debugRetries,
+                  geminiApiKey,
+                  vertexProject,
+                  vertexLocation,
+                  vertexAccessToken,
+                  purpose: 'image_generate_fallback',
+                });
+              } catch (fbErr) {
+                errorMessage = fbErr instanceof Error ? fbErr.message : String(fbErr);
+                images = null;
+              }
             } else {
-              throw err;
+              errorMessage = message;
+              images = null;
             }
           }
 
-          if (!Array.isArray(images) || images.length === 0) throw new Error('Image response is empty');
+          if (!errorMessage && (!Array.isArray(images) || images.length === 0)) errorMessage = 'Image response is empty';
+          if (errorMessage) {
+            failures.push({
+              variant_index: variantIndex,
+              seed: Number.isFinite(variantSeed) ? variantSeed : null,
+              model: variantModel,
+              error: errorMessage,
+            });
+            continue;
+          }
+
+          if (variantModel === fallbackModel) usedModel = fallbackModel;
 
           for (const image of images) {
             if (image.kind === 'file') {
               outputs.push({
                 variant_index: variantIndex,
+                seed: Number.isFinite(variantSeed) ? variantSeed : null,
                 candidate_index: image.candidateIndex,
                 kind: 'file',
+                model: variantModel,
                 mime_type: image.mimeType,
                 file_uri: image.payload,
               });
@@ -607,8 +637,10 @@ export async function generateImageBatch({
 
             outputs.push({
               variant_index: variantIndex,
+              seed: Number.isFinite(variantSeed) ? variantSeed : null,
               candidate_index: image.candidateIndex,
               kind: 'inline',
+              model: variantModel,
               mime_type: image.mimeType,
               output: path.relative(runRoot, outAbs).replaceAll('\\', '/'),
               size: imageBytes.length,
@@ -616,7 +648,11 @@ export async function generateImageBatch({
           }
         }
 
-        if (outputs.length === 0) throw new Error('Image response is empty');
+        if (outputs.length === 0) {
+          const first = failures.find(Boolean);
+          const suffix = first?.error ? ` First error: ${first.error}` : '';
+          throw new Error(`All candidates failed.${suffix}`);
+        }
 
         items[index] = {
           index,
@@ -624,6 +660,7 @@ export async function generateImageBatch({
           status: 'ok',
           model: usedModel,
           outputs,
+          failures,
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -659,7 +696,7 @@ export async function generateImageBatch({
     top_p: Number.isFinite(topP) ? topP : null,
     candidate_count: requestedCandidateCount,
     per_request_candidate_count: perRequestCandidateCount,
-    seed: Number.isFinite(seed) ? Math.floor(seed) : null,
+    seed: normalizeInt32Seed(seed),
     thinking_budget: Number.isFinite(thinkingBudget) ? Math.floor(thinkingBudget) : null,
     thinking_level: normalizedThinkingLevel || null,
     include_thoughts: Boolean(includeThoughts),

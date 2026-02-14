@@ -576,7 +576,8 @@ def main():
                         try:
                             _mime, b64 = _extract_inline_images(data)
                             raw_bytes = base64.b64decode(b64)
-                            im = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+                            with Image.open(io.BytesIO(raw_bytes)) as _src:
+                                im = _src.convert("RGB")
                             if im.size != target_size:
                                 im = im.resize(target_size, resample=Image.Resampling.LANCZOS)
                             im.save(cand_png, "PNG")
