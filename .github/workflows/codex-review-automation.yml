@@ -32,7 +32,9 @@ jobs:
           CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
 
       - name: Label PR when Codex leaves inline feedback (PAT)
+        id: pat_label
         if: steps.token.outputs.present == 'true'
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.CODEX_REVIEW_TOKEN }}
@@ -78,7 +80,7 @@ jobs:
             core.info(`Added labels ${toAdd.join(', ')} to PR #${prNumber}`);
 
       - name: Label PR when Codex leaves inline feedback (GITHUB_TOKEN)
-        if: steps.token.outputs.present != 'true'
+        if: steps.token.outputs.present != 'true' || steps.pat_label.outcome == 'failure'
         uses: actions/github-script@v7
         with:
           script: |
@@ -125,7 +127,7 @@ jobs:
       - name: Dispatch autofix when Codex feedback arrives and autofix/codex is set
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || github.token }}
+          github-token: ${{ github.token }}
           script: |
             const author = context.payload?.comment?.user?.login;
             if (!author || !author.startsWith('chatgpt-codex-connector')) {
@@ -356,7 +358,7 @@ jobs:
       - name: Auto-add autofix/codex when needs-codex-fix is labeled
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || github.token }}
+          github-token: ${{ github.token }}
           script: |
             const action = context.payload.action;
             if (action !== 'labeled') {
@@ -424,8 +426,10 @@ jobs:
         env:
           CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
 
-      - name: Comment @codex review on open/sync
+      - name: Comment @codex review on open/sync (PAT)
+        id: pat_comment
         if: steps.token.outputs.present == 'true'
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.CODEX_REVIEW_TOKEN }}
@@ -496,6 +500,78 @@ jobs:
             });
             core.info(`Posted @codex review request for PR #${prNumber}`);
 
+      - name: Comment @codex review on open/sync (fallback GITHUB_TOKEN)
+        if: steps.token.outputs.present != 'true' || steps.pat_comment.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const action = context.payload.action;
+            const allowed = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review']);
+            if (!allowed.has(action)) {
+              core.info(`Skip: action=${action}`);
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.info('Skip: not a PR event');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = pr.number;
+            const sha = pr.head?.sha;
+            const labels = (pr.labels || []).map(l => l.name);
+
+            if (pr.draft) {
+              core.info('PR is draft; skipping.');
+              return;
+            }
+
+            if (labels.includes('automation/off') || labels.includes('no-bot')) {
+              core.info('automation/off or no-bot present; skipping.');
+              return;
+            }
+
+            if (labels.includes('needs-codex-fix')) {
+              core.info('needs-codex-fix present; rereview flow will handle it.');
+              return;
+            }
+
+            if (pr.head?.repo?.full_name !== `${owner}/${repo}`) {
+              core.info('PR is from a fork; skipping.');
+              return;
+            }
+
+            const markerRe = /<!--\s*codex-review:sha=([0-9a-f]{7,40})\s*-->/i;
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 }
+            );
+            for (let i = comments.length - 1; i >= 0; i--) {
+              const body = comments[i].body || '';
+              const m = body.match(markerRe);
+              if (m) {
+                const lastSha = m[1];
+                if (lastSha === sha) {
+                  core.info(`Already requested @codex review for sha ${sha}; skipping.`);
+                  return;
+                }
+                break;
+              }
+            }
+
+            const body = `<!-- codex-review:sha=${sha} -->\n@codex review`;
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body
+            });
+            core.info(`Posted @codex review request for PR #${prNumber} (fallback).`);
+
   trigger_codex_autofix:
     if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
@@ -511,8 +587,10 @@ jobs:
         env:
           CODEX_REVIEW_TOKEN: ${{ secrets.CODEX_REVIEW_TOKEN }}
 
-      - name: Comment @codex address that feedback when autofix/remote is added
+      - name: Comment @codex address that feedback when autofix/remote is added (PAT)
+        id: pat_autofix_comment
         if: steps.token.outputs.present == 'true'
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.CODEX_REVIEW_TOKEN }}
@@ -551,3 +629,44 @@ jobs:
               body: '@codex address that feedback',
             });
             core.info(`Requested Codex autofix on PR #${prNumber}`);
+
+      - name: Comment @codex address that feedback when autofix/remote is added (fallback GITHUB_TOKEN)
+        if: steps.token.outputs.present != 'true' || steps.pat_autofix_comment.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const label = context.payload.label?.name;
+            if (label !== 'autofix/remote') {
+              core.info(`Skip: label=${label}`);
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.info('Skip: label is not on a PR');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = pr.number;
+            const labels = (pr.labels || []).map(l => l.name);
+
+            if (labels.includes('automation/off') || labels.includes('no-bot')) {
+              core.info('automation/off or no-bot present; skipping.');
+              return;
+            }
+
+            if (pr.head?.repo?.full_name !== `${owner}/${repo}`) {
+              core.info('PR is from a fork; skipping.');
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body: '@codex address that feedback',
+            });
+            core.info(`Requested Codex autofix on PR #${prNumber} (fallback).`);
