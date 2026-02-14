@@ -424,7 +424,14 @@ def main():
             existing_hash = str(existing.get("config_hash") or "").strip()
         except Exception:
             existing_hash = ""
-        if existing_hash and existing_hash != run_config_hash and not int(args.force):
+        if not existing_hash and not int(args.force):
+            raise SystemExit(
+                "Refusing to reuse --out_dir with a missing/invalid config file.\n"
+                f"  out_dir: {out_dir}\n"
+                f"  config_file: {config_path}\n"
+                "Use --force=1 to regenerate tiles, or choose a different --out_dir."
+            )
+        if existing_hash != run_config_hash and not int(args.force):
             raise SystemExit(
                 "Refusing to reuse --out_dir with a different config.\n"
                 f"  out_dir: {out_dir}\n"
