@@ -257,6 +257,19 @@ def _colormap_hot(t):
     return (255, 255, max(0, min(255, b)))
 
 
+def _write_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def _read_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Vertex Nano Banana Pro 4x4 pilot: K candidates per tile + seam scoring.")
 
@@ -363,6 +376,53 @@ def main():
     out_candidates_dir = os.path.join(out_dir, "candidates")
     _ensure_dir(out_tiles_dir)
     _ensure_dir(out_candidates_dir)
+
+    # Guard against accidentally reusing an out_dir from a different config, which would silently
+    # mix old tiles with new ones due to idempotent "skip if exists" behavior.
+    config_path = os.path.join(out_dir, "config_nb_pro.json")
+    run_config = {
+        "version": 1,
+        "run_id": args.run_id,
+        "tiles_dir": _relpath_if_under(run_root, tiles_dir),
+        "layer": str(args.layer),
+        "subgrid": {"x0": int(args.x0), "y0": int(args.y0), "w": int(args.w), "h": int(args.h)},
+        "vertex": {
+            "project": vertex_project,
+            "location": vertex_location,
+            "model": model,
+            "fallback_model": fallback_model,
+            "params_hash": params_hash,
+            "generation_config": cfg,
+        },
+        "k": int(args.k),
+        "seed_mode": str(args.seed_mode),
+        "seed_base": int(args.seed_base),
+        "use_neighbors": int(args.use_neighbors),
+        "neighbor_mode": str(args.neighbor_mode),
+        "overlap_px": int(args.overlap_px),
+        "prompt_hash": prompt_hash,
+        "negative_hash": negative_hash,
+        "anchors_sha256": anchors_hashes,
+        "score_weights": weights,
+    }
+    run_config_hash = _sha256_text(json.dumps(run_config, sort_keys=True))
+    if os.path.isfile(config_path):
+        try:
+            existing = _read_json(config_path)
+            existing_hash = str(existing.get("config_hash") or "").strip()
+        except Exception:
+            existing = None
+            existing_hash = ""
+        if existing_hash and existing_hash != run_config_hash and not int(args.force):
+            raise SystemExit(
+                "Refusing to reuse --out_dir with a different config.\n"
+                f"  out_dir: {out_dir}\n"
+                f"  existing_config_hash: {existing_hash}\n"
+                f"  new_config_hash:      {run_config_hash}\n"
+                "Use --force=1 to regenerate tiles, or choose a different --out_dir."
+            )
+    if (not os.path.isfile(config_path)) or int(args.force):
+        _write_json(config_path, {"config_hash": run_config_hash, "config": run_config})
 
     # Copy tilejson.json for downstream mosaic tool (expects overlap in out_dir/tilejson.json).
     src_tilejson = os.path.join(tiles_dir, "tilejson.json")
@@ -748,6 +808,7 @@ def main():
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tiles_dir": _relpath_if_under(run_root, tiles_dir),
         "out_dir": _relpath_if_under(run_root, out_dir),
+        "config_hash": run_config_hash,
         "vertex": {
             "project": vertex_project,
             "location": vertex_location,
