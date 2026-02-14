@@ -17,7 +17,8 @@ def sha256_file(path):
 
 
 def load_rgb(path, *, target_size=None):
-    img = Image.open(path).convert("RGB")
+    with Image.open(path) as src:
+        img = src.convert("RGB")
     if target_size is not None and img.size != target_size:
         img = img.resize(tuple(target_size), resample=Image.Resampling.LANCZOS)
     arr = np.asarray(img, dtype=np.float32) / 255.0
@@ -152,4 +153,3 @@ def seam_line_rgb_l1_per_col(top_rgb, bottom_rgb, *, overlap_px):
     b = bottom_rgb[0:op, :, :]
     # Mean abs diff per column (collapse strip height + channels).
     return np.mean(np.abs(a - b), axis=(0, 2)).astype(np.float32)
-

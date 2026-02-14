@@ -213,12 +213,15 @@ def _pick_seed(seed_mode, seed_base, x, y, variant_index):
     mode = str(seed_mode or "tile_hash").strip().lower()
     base = int(seed_base) if seed_base is not None else 0
     if mode == "fixed":
-        return base + int(variant_index)
+        seed = base + int(variant_index)
+        return int(seed) & 0x7FFFFFFF
     if mode == "random":
-        return int.from_bytes(os.urandom(4), "big")
+        seed = int.from_bytes(os.urandom(4), "big")
+        return int(seed) & 0x7FFFFFFF
     if mode == "tile_hash":
         raw = f"{base}:{x}:{y}:{variant_index}".encode("utf-8")
-        return int.from_bytes(hashlib.sha256(raw).digest()[:4], "big")
+        seed = int.from_bytes(hashlib.sha256(raw).digest()[:4], "big")
+        return int(seed) & 0x7FFFFFFF
     raise ValueError(f"Unsupported --seed_mode: {seed_mode}")
 
 
@@ -547,6 +550,7 @@ def main():
                             purpose="image_generate",
                         )
 
+                    data = None
                     try:
                         data = _call_model(model)
                     except Exception as e:
@@ -559,7 +563,11 @@ def main():
                                 shutil.copyfile(cache_png, cand_png)
                                 cached = True
                             else:
-                                data = _call_model(fallback_model)
+                                try:
+                                    data = _call_model(fallback_model)
+                                except Exception as fb_e:
+                                    error = str(fb_e)
+                                    data = None
                         else:
                             error = msg
                             data = None
@@ -682,7 +690,8 @@ def main():
             y0 = (y - args.y0) * ch
             for i, v in enumerate(per_row[:ch]):
                 # Store raw intensity; normalize later.
-                heat_px[seam_x - 1, y0 + i] = (int(v * 255.0), 0, 0) if seam_x - 1 >= 0 else (0, 0, 0)
+                if seam_x - 1 >= 0:
+                    heat_px[seam_x - 1, y0 + i] = (int(v * 255.0), 0, 0)
                 if seam_x < mosaic_w:
                     heat_px[seam_x, y0 + i] = (int(v * 255.0), 0, 0)
 
@@ -705,7 +714,8 @@ def main():
             seam_y = (y - args.y0 + 1) * ch
             x0 = (x - args.x0) * cw
             for i, v in enumerate(per_col[:cw]):
-                heat_px[x0 + i, seam_y - 1] = (int(v * 255.0), 0, 0) if seam_y - 1 >= 0 else (0, 0, 0)
+                if seam_y - 1 >= 0:
+                    heat_px[x0 + i, seam_y - 1] = (int(v * 255.0), 0, 0)
                 if seam_y < mosaic_h:
                     heat_px[x0 + i, seam_y] = (int(v * 255.0), 0, 0)
 
