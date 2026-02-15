@@ -19,6 +19,11 @@ Options:
   --edge_threshold   0..255 (default: 48)
   --edge_alpha       0..1 (default: 0.85)
   --edge_thickness   >= 1 (default: 2)
+  --max_edge_coverage 0..1 guardrail for low-res edge coverage before raising threshold (default: 0.22)
+  --edge_dark_min_luma Only draw edges where quantized luminance <= this (default: 100)
+  --contrast         Pre-quantize contrast boost (default: 1.10)
+  --saturation       Pre-quantize saturation boost (default: 1.05)
+  --edge_border_strip Omit edges within this many pixels of each tile border (default: 0)
   --max_images       Optional cap on images processed (default: 0=all)
 
 Notes:
@@ -82,6 +87,11 @@ export async function stylizePixelDir({
   edgeThreshold = 48,
   edgeAlpha = 0.85,
   edgeThickness = 2,
+  maxEdgeCoverage = 0.22,
+  edgeDarkMinLuma = 100,
+  contrast = 1.1,
+  saturation = 1.05,
+  edgeBorderStrip = 0,
   maxImages = 0,
 }) {
   assertSafeRunId(runId);
@@ -127,6 +137,16 @@ export async function stylizePixelDir({
         String(edgeAlpha),
         '--edge_thickness',
         String(edgeThickness),
+        '--max_edge_coverage',
+        String(maxEdgeCoverage),
+        '--edge_dark_min_luma',
+        String(edgeDarkMinLuma),
+        '--contrast',
+        String(contrast),
+        '--saturation',
+        String(saturation),
+        '--edge_border_strip',
+        String(edgeBorderStrip),
       ],
     });
 
@@ -149,6 +169,11 @@ export async function stylizePixelDir({
     edge_threshold: edgeThreshold,
     edge_alpha: edgeAlpha,
     edge_thickness: edgeThickness,
+    max_edge_coverage: maxEdgeCoverage,
+    edge_dark_min_luma: edgeDarkMinLuma,
+    contrast,
+    saturation,
+    edge_border_strip: edgeBorderStrip,
     files: processed,
   };
   await fs.writeFile(reportAbs, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
@@ -182,6 +207,11 @@ async function main() {
   const edgeThreshold = Number(typeof args.edge_threshold === 'string' ? args.edge_threshold : args.edgeThreshold);
   const edgeAlpha = Number(typeof args.edge_alpha === 'string' ? args.edge_alpha : args.edgeAlpha);
   const edgeThickness = Number(typeof args.edge_thickness === 'string' ? args.edge_thickness : args.edgeThickness);
+  const maxEdgeCoverage = Number(typeof args.max_edge_coverage === 'string' ? args.max_edge_coverage : args.maxEdgeCoverage);
+  const edgeDarkMinLuma = Number(typeof args.edge_dark_min_luma === 'string' ? args.edge_dark_min_luma : args.edgeDarkMinLuma);
+  const contrast = Number(args.contrast);
+  const saturation = Number(args.saturation);
+  const edgeBorderStrip = Number(typeof args.edge_border_strip === 'string' ? args.edge_border_strip : args.edgeBorderStrip);
   const maxImages = Number(typeof args.max_images === 'string' ? args.max_images : args.maxImages);
 
   const repoRoot = (await findRepoRoot(process.cwd())) ?? process.cwd();
@@ -198,6 +228,11 @@ async function main() {
       edgeThreshold: Number.isFinite(edgeThreshold) ? edgeThreshold : 48,
       edgeAlpha: Number.isFinite(edgeAlpha) ? edgeAlpha : 0.85,
       edgeThickness: Number.isFinite(edgeThickness) ? edgeThickness : 2,
+      maxEdgeCoverage: Number.isFinite(maxEdgeCoverage) ? maxEdgeCoverage : 0.22,
+      edgeDarkMinLuma: Number.isFinite(edgeDarkMinLuma) ? edgeDarkMinLuma : 100,
+      contrast: Number.isFinite(contrast) ? contrast : 1.1,
+      saturation: Number.isFinite(saturation) ? saturation : 1.05,
+      edgeBorderStrip: Number.isFinite(edgeBorderStrip) ? edgeBorderStrip : 0,
       maxImages: Number.isFinite(maxImages) ? maxImages : 0,
     });
     console.log(JSON.stringify(result));
@@ -222,4 +257,3 @@ const isEntrypoint = (() => {
 if (isEntrypoint) {
   await main();
 }
-
