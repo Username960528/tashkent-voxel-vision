@@ -68,7 +68,7 @@ def _sobel_l1_mean(a_rgb, b_rgb):
     return float(np.mean(np.abs(a_mag - b_mag)))
 
 
-def normalize_weights(weights):
+def normalize_weights(weights, *, default=None):
     w = dict(weights or {})
     out = {}
     for k in ("rgb_l1", "rgb_l2", "sobel_l1"):
@@ -82,7 +82,9 @@ def normalize_weights(weights):
         if math.isfinite(fv):
             out[k] = fv
     if not out:
-        out = {"rgb_l1": 1.0, "rgb_l2": 0.25, "sobel_l1": 0.5}
+        if default is None:
+            default = {"rgb_l1": 1.0, "rgb_l2": 0.25, "sobel_l1": 0.5}
+        out = dict(default)
     return out
 
 

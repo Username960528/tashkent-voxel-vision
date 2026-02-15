@@ -46,6 +46,10 @@ Neighbors:
 Scoring:
   --overlap_px            Strip width for seam scoring (default: 48)
   --score_weights         JSON string or path to JSON file (optional)
+  --structure_weight      Weight for structure-fidelity score (default: 0.75)
+  --structure_downscale_px  Downscale px for structure scoring (default: 128)
+  --structure_weights     JSON string or path to JSON file (optional)
+  --fallback_penalty      Additive penalty when fallback model is used (default: 0.05)
 
 Cache:
   --cache_dir             Cache dir (default: .cache/vertex_nb_pro)
@@ -141,6 +145,10 @@ export async function runIsoVertexNbpro({
   neighborMode = 'left+top',
   overlapPx = 48,
   scoreWeights = '',
+  structureWeight = 0.75,
+  structureDownscalePx = 128,
+  structureWeights = '',
+  fallbackPenalty = 0.05,
   cacheDir = '.cache/vertex_nb_pro',
   force = 0,
   imageSize = '1K',
@@ -260,6 +268,13 @@ export async function runIsoVertexNbpro({
       '--overlap_px',
       String(Math.trunc(overlapPx)),
       ...(scoreWeights ? ['--score_weights', String(scoreWeights)] : []),
+      '--structure_weight',
+      String(structureWeight),
+      '--structure_downscale_px',
+      String(Math.trunc(structureDownscalePx)),
+      ...(structureWeights ? ['--structure_weights', String(structureWeights)] : []),
+      '--fallback_penalty',
+      String(fallbackPenalty),
       '--cache_dir',
       path.isAbsolute(cacheDir) ? cacheDir : path.join(repoRoot, cacheDir),
       '--force',
@@ -363,6 +378,10 @@ async function main() {
       neighborMode: typeof args.neighbor_mode === 'string' ? args.neighbor_mode : 'left+top',
       overlapPx: parseNumber(args, 'overlap_px', 48),
       scoreWeights: typeof args.score_weights === 'string' ? args.score_weights : '',
+      structureWeight: parseNumber(args, 'structure_weight', 0.75),
+      structureDownscalePx: parseNumber(args, 'structure_downscale_px', 128),
+      structureWeights: typeof args.structure_weights === 'string' ? args.structure_weights : '',
+      fallbackPenalty: parseNumber(args, 'fallback_penalty', 0.05),
       cacheDir: typeof args.cache_dir === 'string' ? args.cache_dir : '.cache/vertex_nb_pro',
       force: parseNumber(args, 'force', 0),
       imageSize: typeof args.image_size === 'string' ? args.image_size : '1K',
