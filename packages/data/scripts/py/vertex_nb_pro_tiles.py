@@ -324,6 +324,12 @@ def main():
     ap.add_argument("--negative_prompt_file", default="")
     ap.add_argument("--use_neighbors", type=int, default=1)
     ap.add_argument("--neighbor_mode", default="left+top")
+    ap.add_argument(
+        "--neighbors_in_prompt",
+        type=int,
+        default=1,
+        help="If 1, include already-accepted neighbors as images in the generation prompt (still always used for scoring).",
+    )
 
     ap.add_argument("--overlap_px", type=int, default=48)
     ap.add_argument("--score_weights", default="")
@@ -363,6 +369,8 @@ def main():
         raise SystemExit("--k must be > 0")
     if args.overlap_px <= 0:
         raise SystemExit("--overlap_px must be > 0")
+    if int(args.neighbors_in_prompt) not in (0, 1):
+        raise SystemExit("--neighbors_in_prompt must be 0 or 1")
     if args.structure_downscale_px <= 0:
         raise SystemExit("--structure_downscale_px must be > 0")
     if not math.isfinite(float(args.structure_weight)) or float(args.structure_weight) < 0.0:
@@ -466,6 +474,7 @@ def main():
         "seed_base": int(args.seed_base),
         "use_neighbors": int(args.use_neighbors),
         "neighbor_mode": str(args.neighbor_mode),
+        "neighbors_in_prompt": int(args.neighbors_in_prompt),
         "overlap_px": int(args.overlap_px),
         "prompt_hash": prompt_hash,
         "negative_hash": negative_hash,
@@ -630,7 +639,7 @@ def main():
                     shutil.copyfile(cache_png, cand_png)
                     cached = True
                 else:
-                    # Build multimodal prompt: anchors + neighbors + current whitebox.
+                    # Build multimodal prompt: anchors + (optional) accepted neighbors + input tile.
                     parts = []
                     parts.append({"text": prompt_text.strip()})
                     if negative_text.strip():
@@ -640,7 +649,7 @@ def main():
                     for i, p in enumerate(anchor_paths):
                         parts.extend(_file_to_inline_part(p, f"ANCHOR {i+1}"))
 
-                    if neighbors:
+                    if neighbors and int(args.neighbors_in_prompt):
                         parts.append({"text": "Already accepted neighbor tiles (match seams and global consistency):"})
                         if "left" in neighbors:
                             parts.extend(_file_to_inline_part(neighbors["left"], "NEIGHBOR LEFT"))
@@ -649,7 +658,7 @@ def main():
                         if "tl" in neighbors:
                             parts.extend(_file_to_inline_part(neighbors["tl"], "NEIGHBOR TOP-LEFT"))
 
-                    parts.append({"text": "Input whitebox tile (preserve geometry/camera/roads/building footprints):"})
+                    parts.append({"text": "Input tile (preserve geometry/camera/roads/building footprints):"})
                     parts.extend(_file_to_inline_part(tile_in, "WHITEBOX"))
 
                     parts.append(

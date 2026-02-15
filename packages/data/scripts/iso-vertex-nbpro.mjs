@@ -42,6 +42,7 @@ Style:
 Neighbors:
   --use_neighbors         0|1 (default: 1)
   --neighbor_mode         left+top | left+top+tl (default: left+top)
+  --neighbors_in_prompt   0|1 Include neighbors as prompt images (default: 1)
 
 Scoring:
   --overlap_px            Strip width for seam scoring (default: 48)
@@ -143,6 +144,7 @@ export async function runIsoVertexNbpro({
   negativePromptFile = '',
   useNeighbors = 1,
   neighborMode = 'left+top',
+  neighborsInPrompt = 1,
   overlapPx = 48,
   scoreWeights = '',
   structureWeight = 0.75,
@@ -265,6 +267,8 @@ export async function runIsoVertexNbpro({
       String(Math.trunc(useNeighbors)),
       '--neighbor_mode',
       String(neighborMode || 'left+top'),
+      '--neighbors_in_prompt',
+      String(Math.trunc(neighborsInPrompt)),
       '--overlap_px',
       String(Math.trunc(overlapPx)),
       ...(scoreWeights ? ['--score_weights', String(scoreWeights)] : []),
@@ -376,6 +380,7 @@ async function main() {
       negativePromptFile: typeof args.negative_prompt_file === 'string' ? args.negative_prompt_file : '',
       useNeighbors: parseNumber(args, 'use_neighbors', 1),
       neighborMode: typeof args.neighbor_mode === 'string' ? args.neighbor_mode : 'left+top',
+      neighborsInPrompt: parseNumber(args, 'neighbors_in_prompt', 1),
       overlapPx: parseNumber(args, 'overlap_px', 48),
       scoreWeights: typeof args.score_weights === 'string' ? args.score_weights : '',
       structureWeight: parseNumber(args, 'structure_weight', 0.75),
