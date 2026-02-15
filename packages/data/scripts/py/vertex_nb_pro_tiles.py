@@ -390,6 +390,8 @@ def main():
     layer_lower = str(args.layer).strip().lower()
 
     prompt_user = _read_text(args.prompt_file)
+    # Keep prompt templates consistent with the in-code multimodal labels (we label the input image as "INPUT TILE").
+    prompt_user = str(prompt_user or "").replace("labeled WHITEBOX", "labeled INPUT TILE").replace("WHITEBOX", "INPUT TILE")
     negative_text = _read_text(args.negative_prompt_file) if args.negative_prompt_file else ""
 
     # Guardrails live in-code so pilots stay reproducible even when users keep prompt templates short.
