@@ -101,6 +101,8 @@ pnpm data:iso:vertex:nbpro \
   --run_id=tashkent_2026-02-07 \
   --tiles_dir=exports/iso_whitebox \
   --layer=raw_whitebox \
+  --ref_tiles_dir=exports/iso_satellite \
+  --ref_layer=raw_satellite \
   --x0=0 --y0=0 --w=4 --h=4 \
   --out_dir=exports/iso_nb_pro \
   --model=gemini-3-pro-image-preview \

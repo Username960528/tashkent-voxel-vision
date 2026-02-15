@@ -305,6 +305,8 @@ def main():
     ap.add_argument("--run_root", required=True, help="Absolute run root (data/releases/<run_id>)")
     ap.add_argument("--tiles_dir", required=True, help="Absolute base tiles dir (expects tilejson.json and layer/0/x/y.png)")
     ap.add_argument("--layer", default="raw_whitebox", help="Input layer inside tiles_dir (default: raw_whitebox)")
+    ap.add_argument("--ref_tiles_dir", default="", help="Optional absolute base tiles dir for COLOR REFERENCE (layer/0/x/y.png)")
+    ap.add_argument("--ref_layer", default="", help="Optional reference layer inside ref_tiles_dir (used as COLOR REFERENCE)")
     ap.add_argument("--out_dir", required=True, help="Absolute output dir (exports/iso_nb_pro)")
 
     ap.add_argument("--x0", type=int, required=True)
@@ -359,12 +361,24 @@ def main():
 
     run_root = os.path.abspath(args.run_root)
     tiles_dir = os.path.abspath(args.tiles_dir)
+    ref_tiles_dir = ""
+    ref_layer = ""
+    ref_enabled = bool(str(args.ref_tiles_dir or "").strip() or str(args.ref_layer or "").strip())
+    if ref_enabled:
+        if not str(args.ref_tiles_dir or "").strip():
+            raise SystemExit("--ref_layer requires --ref_tiles_dir")
+        if not str(args.ref_layer or "").strip():
+            raise SystemExit("--ref_tiles_dir requires --ref_layer")
+        ref_tiles_dir = os.path.abspath(args.ref_tiles_dir)
+        ref_layer = str(args.ref_layer).strip()
     out_dir = os.path.abspath(args.out_dir)
 
     if not os.path.isdir(run_root):
         raise SystemExit(f"missing run_root: {run_root}")
     if not os.path.isdir(tiles_dir):
         raise SystemExit(f"missing tiles_dir: {tiles_dir}")
+    if ref_enabled and not os.path.isdir(ref_tiles_dir):
+        raise SystemExit(f"missing ref_tiles_dir: {ref_tiles_dir}")
     if args.w <= 0 or args.h <= 0:
         raise SystemExit("--w/--h must be > 0")
     if args.k <= 0:
@@ -402,7 +416,11 @@ def main():
         "- Do not introduce new large objects that cross tile boundaries.",
         "- Keep global lighting/camera consistent with the anchors.",
     ]
-    if "whitebox" not in layer_lower:
+    if ref_enabled:
+        prompt_guardrails_lines.insert(
+            1, "- Preserve per-building roof colors/materials from the COLOR REFERENCE tile; avoid homogenizing everything."
+        )
+    elif "whitebox" not in layer_lower:
         prompt_guardrails_lines.insert(1, "- Preserve per-building roof colors/materials from the input tile; avoid homogenizing everything.")
     prompt_guardrails = "\n".join(prompt_guardrails_lines).strip()
     prompt_guardrails_hash = _sha256_text(prompt_guardrails) if prompt_guardrails else ""
@@ -474,6 +492,22 @@ def main():
         anchors_hashes.append(h)
         anchors_info.append({"path": _relpath_if_under(run_root, p), "sha256": h})
 
+    # Determine target output size from first input tile (and validate ref tile when present).
+    sample_in = os.path.join(tiles_dir, args.layer, "0", str(args.x0), f"{args.y0}.png")
+    if not os.path.isfile(sample_in):
+        raise SystemExit(f"missing input tile: {sample_in}")
+    with Image.open(sample_in) as _sample_src:
+        sample_img = _sample_src.convert("RGB")
+        target_size = sample_img.size
+
+    sample_ref = ""
+    ref_sample_sha256 = ""
+    if ref_enabled:
+        sample_ref = os.path.join(ref_tiles_dir, ref_layer, "0", str(args.x0), f"{args.y0}.png")
+        if not os.path.isfile(sample_ref):
+            raise SystemExit(f"missing ref tile: {sample_ref}")
+        ref_sample_sha256 = sha256_file(sample_ref)
+
     # Guard against accidentally reusing an out_dir from a different config, which would silently
     # mix old tiles with new ones due to idempotent "skip if exists" behavior.
     config_path = os.path.join(out_dir, "config_nb_pro.json")
@@ -483,6 +517,10 @@ def main():
         "run_id": args.run_id,
         "tiles_dir": _relpath_if_under(run_root, tiles_dir),
         "layer": str(args.layer),
+        "ref_tiles_dir": _relpath_if_under(run_root, ref_tiles_dir) if ref_enabled else None,
+        "ref_layer": str(ref_layer) if ref_enabled else None,
+        "ref_sample_tile": _relpath_if_under(run_root, sample_ref) if ref_enabled else None,
+        "ref_sample_tile_sha256": str(ref_sample_sha256) if ref_enabled else None,
         "subgrid": {"x0": int(args.x0), "y0": int(args.y0), "w": int(args.w), "h": int(args.h)},
         "vertex": {
             "project": vertex_project,
@@ -534,14 +572,6 @@ def main():
     if (not os.path.isfile(config_path)) or int(args.force):
         _write_json(config_path, {"config_hash": run_config_hash, "config": run_config})
 
-    # Determine target output size from first input tile.
-    sample_in = os.path.join(tiles_dir, args.layer, "0", str(args.x0), f"{args.y0}.png")
-    if not os.path.isfile(sample_in):
-        raise SystemExit(f"missing input tile: {sample_in}")
-    with Image.open(sample_in) as _sample_src:
-        sample_img = _sample_src.convert("RGB")
-        target_size = sample_img.size
-
     selected = {}  # (x,y) -> abs path
     selected_sha = {}  # (x,y) -> sha256
 
@@ -558,6 +588,14 @@ def main():
             if not os.path.isfile(tile_in):
                 raise SystemExit(f"missing input tile in patch: {tile_in}")
 
+            ref_tile_in = ""
+            ref_tile_hash = ""
+            if ref_enabled:
+                ref_tile_in = os.path.join(ref_tiles_dir, ref_layer, "0", str(x), f"{y}.png")
+                if not os.path.isfile(ref_tile_in):
+                    raise SystemExit(f"missing ref tile in patch: {ref_tile_in}")
+                ref_tile_hash = sha256_file(ref_tile_in)
+
             tile_out = _selected_path(x, y)
             _ensure_dir(os.path.dirname(tile_out))
 
@@ -567,6 +605,8 @@ def main():
                 # Keep the historical key for compatibility; pilots may use non-whitebox layers (e.g. raw satellite).
                 "input_tile_path": rel_input,
                 "input_whitebox_path": rel_input,
+                "ref_tile_path": _relpath_if_under(run_root, ref_tile_in) if ref_enabled else None,
+                "ref_tile_sha256": str(ref_tile_hash) if ref_enabled else None,
                 "neighbors_used": [],
                 "prompt_hash": prompt_hash,
                 "candidates": [],
@@ -639,6 +679,8 @@ def main():
                     "y": int(y),
                     "layer": str(args.layer),
                     "tile_in_sha256": tile_in_hash,
+                    "ref_layer": str(ref_layer) if ref_enabled else "",
+                    "ref_tile_in_sha256": str(ref_tile_hash) if ref_enabled else "",
                     "seed": int(seed),
                     "cfg": cfg,
                     "neighbor_mode": str(args.neighbor_mode),
@@ -692,6 +734,14 @@ def main():
                         if "tl" in neighbors:
                             parts.extend(_file_to_inline_part(neighbors["tl"], "NEIGHBOR TOP-LEFT"))
 
+                    if ref_enabled:
+                        parts.append(
+                            {
+                                "text": f"Color reference tile (layer={ref_layer}, use only for colors/materials/texture; do not change geometry):"
+                            }
+                        )
+                        parts.extend(_file_to_inline_part(ref_tile_in, "COLOR REFERENCE"))
+
                     if "whitebox" in layer_lower:
                         input_desc = f"Input tile (layer={args.layer}, whitebox/structure guide): preserve geometry/camera/roads/building footprints."
                     else:
@@ -699,6 +749,8 @@ def main():
                             f"Input tile (layer={args.layer}, source/aerial): preserve road layout + building footprints, "
                             "and keep local roof colors/materials (avoid homogenizing palette)."
                         )
+                    if ref_enabled:
+                        input_desc = input_desc.rstrip(".") + "; use COLOR REFERENCE to guide colors/materials."
                     parts.append({"text": input_desc})
                     parts.extend(_file_to_inline_part(tile_in, "INPUT TILE"))
 
@@ -963,6 +1015,10 @@ def main():
         "run_id": args.run_id,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tiles_dir": _relpath_if_under(run_root, tiles_dir),
+        "ref_tiles_dir": _relpath_if_under(run_root, ref_tiles_dir) if ref_enabled else None,
+        "ref_layer": str(ref_layer) if ref_enabled else None,
+        "ref_sample_tile": _relpath_if_under(run_root, sample_ref) if ref_enabled else None,
+        "ref_sample_tile_sha256": str(ref_sample_sha256) if ref_enabled else None,
         "out_dir": _relpath_if_under(run_root, out_dir),
         "config_hash": run_config_hash,
         "vertex": {

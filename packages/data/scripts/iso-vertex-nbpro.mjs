@@ -16,6 +16,8 @@ function printHelp() {
 Options:
   --out_dir               Output dir (run-relative). Default: exports/iso_nb_pro
   --layer                 Input layer inside tiles_dir. Default: raw_whitebox
+  --ref_tiles_dir         Optional tiles dir for color reference (run-relative)
+  --ref_layer             Input layer inside ref_tiles_dir for color reference (optional)
   --w --h                 Patch size in tiles. Default: 4x4
 
 Vertex:
@@ -69,6 +71,8 @@ Examples:
     --run_id=tashkent_local_2026-02-09 \\
     --tiles_dir=exports/iso_whitebox \\
     --layer=raw_whitebox \\
+    --ref_tiles_dir=exports/iso_satellite \\
+    --ref_layer=raw_satellite \\
     --x0=0 --y0=0 --w=4 --h=4 \\
     --model=gemini-3-pro-image-preview --fallback_model=gemini-2.5-flash-image \\
     --anchors_dir=exports/anchors/nbpro \\
@@ -81,6 +85,33 @@ async function fileExists(filePath) {
   try {
     await fs.stat(filePath);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hasAnyPngTiles(tilesAbs) {
+  // tilesAbs: .../<out_dir>/tiles (expects z=0/<x>/<y>.png)
+  const z0 = path.join(tilesAbs, '0');
+  try {
+    const xs = await fs.readdir(z0);
+    for (const xName of xs) {
+      const xDir = path.join(z0, xName);
+      try {
+        const st = await fs.stat(xDir);
+        if (!st.isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      let ys = [];
+      try {
+        ys = await fs.readdir(xDir);
+      } catch {
+        continue;
+      }
+      if (ys.some((n) => n.toLowerCase().endsWith('.png'))) return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -126,6 +157,8 @@ export async function runIsoVertexNbpro({
   runId,
   tilesDirRel,
   layer = 'raw_whitebox',
+  refTilesDirRel = '',
+  refLayer = '',
   outDirRel = 'exports/iso_nb_pro',
   x0,
   y0,
@@ -170,6 +203,10 @@ export async function runIsoVertexNbpro({
   if (typeof repoRoot !== 'string' || repoRoot.length === 0) throw new Error('Missing repoRoot');
   if (typeof tilesDirRel !== 'string' || tilesDirRel.trim().length === 0) throw new Error('Missing required --tiles_dir');
   if (!/^[a-zA-Z0-9._-]+$/.test(layer)) throw new Error(`Invalid --layer: ${layer}`);
+  if ((refTilesDirRel && !refLayer) || (!refTilesDirRel && refLayer)) {
+    throw new Error('Both --ref_tiles_dir and --ref_layer must be set together (or neither).');
+  }
+  if (refLayer && !/^[a-zA-Z0-9._-]+$/.test(refLayer)) throw new Error(`Invalid --ref_layer: ${refLayer}`);
   if (!Number.isFinite(x0) || !Number.isFinite(y0)) throw new Error('Missing required --x0/--y0');
   if (!model || String(model).trim().length === 0) throw new Error('Missing required --model');
 
@@ -181,9 +218,11 @@ export async function runIsoVertexNbpro({
   }
 
   const tilesDirRelSafe = ensureRelPath(tilesDirRel) ?? '';
+  const refTilesDirRelSafe = refTilesDirRel ? ensureRelPath(refTilesDirRel) ?? '' : '';
   const outDirRelSafe = ensureRelPath(outDirRel) ?? 'exports/iso_nb_pro';
 
   const tilesBaseAbs = path.join(runRoot, tilesDirRelSafe);
+  const refTilesBaseAbs = refTilesDirRelSafe ? path.join(runRoot, refTilesDirRelSafe) : '';
   const outBaseAbs = path.join(runRoot, outDirRelSafe);
 
   const promptAbs = resolvePath(runRoot, promptFile);
@@ -234,6 +273,7 @@ export async function runIsoVertexNbpro({
       tilesBaseAbs,
       '--layer',
       layer,
+      ...(refTilesBaseAbs ? ['--ref_tiles_dir', refTilesBaseAbs, '--ref_layer', refLayer] : []),
       '--out_dir',
       outBaseAbs,
       '--x0',
@@ -320,15 +360,19 @@ export async function runIsoVertexNbpro({
 
   if (!['crop', 'blend'].includes(mosaicMode)) throw new Error(`Invalid --mosaic_mode: ${String(mosaicMode)}`);
 
-  const mosaic = await buildIsoMosaic({
-    repoRoot,
-    runId,
-    tilesDirRel: outDirRelSafe,
-    layer: 'tiles',
-    mode: mosaicMode,
-    featherPx: mosaicMode === 'blend' ? mosaicFeather : 0,
-    outRel: `${outDirRelSafe}/mosaic_nb_pro.png`,
-  });
+  let mosaicRel = null;
+  if (await hasAnyPngTiles(path.join(outBaseAbs, 'tiles'))) {
+    const mosaic = await buildIsoMosaic({
+      repoRoot,
+      runId,
+      tilesDirRel: outDirRelSafe,
+      layer: 'tiles',
+      mode: mosaicMode,
+      featherPx: mosaicMode === 'blend' ? mosaicFeather : 0,
+      outRel: `${outDirRelSafe}/mosaic_nb_pro.png`,
+    });
+    mosaicRel = mosaic.outRel;
+  }
 
   return {
     runId,
@@ -336,7 +380,7 @@ export async function runIsoVertexNbpro({
     outDirRel: outDirRelSafe,
     reportRel: reportExists ? path.relative(runRoot, reportAbs).replaceAll('\\', '/') : null,
     heatmapRel: heatmapExists ? path.relative(runRoot, heatmapAbs).replaceAll('\\', '/') : null,
-    mosaicRel: mosaic.outRel,
+    mosaicRel,
   };
 }
 
@@ -353,6 +397,8 @@ async function main() {
   const tilesDirRel = ensureRelPath(typeof args.tiles_dir === 'string' ? args.tiles_dir : args.tilesDir) ?? '';
   const outDirRel = ensureRelPath(typeof args.out_dir === 'string' ? args.out_dir : args.outDir) ?? 'exports/iso_nb_pro';
   const layer = typeof args.layer === 'string' ? args.layer : 'raw_whitebox';
+  const refTilesDirRel = ensureRelPath(typeof args.ref_tiles_dir === 'string' ? args.ref_tiles_dir : args.refTilesDir) ?? '';
+  const refLayer = typeof args.ref_layer === 'string' ? args.ref_layer : '';
 
   const repoRoot = (await findRepoRoot(process.cwd())) ?? process.cwd();
 
@@ -362,6 +408,8 @@ async function main() {
       runId,
       tilesDirRel,
       layer,
+      refTilesDirRel,
+      refLayer,
       outDirRel,
       x0: parseNumber(args, 'x0', NaN),
       y0: parseNumber(args, 'y0', NaN),
