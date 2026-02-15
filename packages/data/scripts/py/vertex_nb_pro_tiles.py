@@ -25,6 +25,8 @@ from seam_score import (
     sha256_file,
 )
 
+PROMPT_LAYOUT_VERSION = 2
+
 
 def _ensure_dir(p):
     os.makedirs(p, exist_ok=True)
@@ -385,9 +387,25 @@ def main():
         if not os.path.isfile(p):
             raise SystemExit(f"missing anchor: {p}")
 
-    prompt_text = _read_text(args.prompt_file)
+    layer_lower = str(args.layer).strip().lower()
+
+    prompt_user = _read_text(args.prompt_file)
     negative_text = _read_text(args.negative_prompt_file) if args.negative_prompt_file else ""
 
+    # Guardrails live in-code so pilots stay reproducible even when users keep prompt templates short.
+    # These are appended to the user prompt and included in prompt_hash/cache keys.
+    prompt_guardrails_lines = [
+        "Hard constraints:",
+        "- Do not copy the anchors or neighbors; use them only as style references.",
+        "- Do not introduce new large objects that cross tile boundaries.",
+        "- Keep global lighting/camera consistent with the anchors.",
+    ]
+    if "whitebox" not in layer_lower:
+        prompt_guardrails_lines.insert(1, "- Preserve per-building roof colors/materials from the input tile; avoid homogenizing everything.")
+    prompt_guardrails = "\n".join(prompt_guardrails_lines).strip()
+    prompt_guardrails_hash = _sha256_text(prompt_guardrails) if prompt_guardrails else ""
+
+    prompt_text = (str(prompt_user or "").strip() + "\n\n" + prompt_guardrails).strip()
     prompt_hash = _sha256_text(prompt_text)
     negative_hash = _sha256_text(negative_text) if negative_text else ""
 
@@ -411,10 +429,12 @@ def main():
             structure_weights_raw = json.loads(_read_text(raw))
         else:
             raise SystemExit(f"--structure_weights must be a JSON string or existing file path: {raw}")
-    structure_weights_norm = normalize_weights(
-        structure_weights_raw,
-        default={"rgb_l1": 0.15, "rgb_l2": 0.0, "sobel_l1": 1.0},
-    )
+    # For satellite/raw tiles, bias selection harder towards color/texture fidelity so we don't collapse
+    # into a single "safe" roof palette just to minimize seam diffs.
+    default_structure_weights = {"rgb_l1": 0.15, "rgb_l2": 0.0, "sobel_l1": 1.0}
+    if "whitebox" not in layer_lower:
+        default_structure_weights = {"rgb_l1": 1.0, "rgb_l2": 0.0, "sobel_l1": 0.5}
+    structure_weights_norm = normalize_weights(structure_weights_raw, default=default_structure_weights)
 
     structure_weight = float(args.structure_weight)
     structure_downscale_px = int(args.structure_downscale_px)
@@ -456,7 +476,8 @@ def main():
     # mix old tiles with new ones due to idempotent "skip if exists" behavior.
     config_path = os.path.join(out_dir, "config_nb_pro.json")
     run_config = {
-        "version": 1,
+        "version": 2,
+        "prompt_layout_version": PROMPT_LAYOUT_VERSION,
         "run_id": args.run_id,
         "tiles_dir": _relpath_if_under(run_root, tiles_dir),
         "layer": str(args.layer),
@@ -477,6 +498,7 @@ def main():
         "neighbors_in_prompt": int(args.neighbors_in_prompt),
         "overlap_px": int(args.overlap_px),
         "prompt_hash": prompt_hash,
+        "prompt_guardrails_hash": prompt_guardrails_hash,
         "negative_hash": negative_hash,
         "anchors_sha256": anchors_hashes,
         "score_weights": seam_weights_norm,
@@ -537,9 +559,12 @@ def main():
             tile_out = _selected_path(x, y)
             _ensure_dir(os.path.dirname(tile_out))
 
+            rel_input = _relpath_if_under(run_root, tile_in)
             tile_entry = {
                 "coord": {"x": int(x), "y": int(y)},
-                "input_whitebox_path": _relpath_if_under(run_root, tile_in),
+                # Keep the historical key for compatibility; pilots may use non-whitebox layers (e.g. raw satellite).
+                "input_tile_path": rel_input,
+                "input_whitebox_path": rel_input,
                 "neighbors_used": [],
                 "prompt_hash": prompt_hash,
                 "candidates": [],
@@ -603,16 +628,19 @@ def main():
             for vi in range(int(args.k)):
                 seed = _pick_seed(args.seed_mode, args.seed_base, x, y, vi)
                 gen_common = {
+                    "prompt_layout_version": PROMPT_LAYOUT_VERSION,
                     "prompt_hash": prompt_hash,
                     "negative_hash": negative_hash,
                     "anchors": anchors_hashes,
                     "neighbors": neighbor_hashes,
                     "x": int(x),
                     "y": int(y),
+                    "layer": str(args.layer),
                     "tile_in_sha256": tile_in_hash,
                     "seed": int(seed),
                     "cfg": cfg,
                     "neighbor_mode": str(args.neighbor_mode),
+                    "neighbors_in_prompt": int(args.neighbors_in_prompt),
                 }
 
                 def _cache_key(model_used):
@@ -650,7 +678,11 @@ def main():
                         parts.extend(_file_to_inline_part(p, f"ANCHOR {i+1}"))
 
                     if neighbors and int(args.neighbors_in_prompt):
-                        parts.append({"text": "Already accepted neighbor tiles (match seams and global consistency):"})
+                        parts.append(
+                            {
+                                "text": "Already accepted neighbor tiles (use only to match seams/global consistency; do not copy interiors):"
+                            }
+                        )
                         if "left" in neighbors:
                             parts.extend(_file_to_inline_part(neighbors["left"], "NEIGHBOR LEFT"))
                         if "top" in neighbors:
@@ -658,12 +690,19 @@ def main():
                         if "tl" in neighbors:
                             parts.extend(_file_to_inline_part(neighbors["tl"], "NEIGHBOR TOP-LEFT"))
 
-                    parts.append({"text": "Input tile (preserve geometry/camera/roads/building footprints):"})
-                    parts.extend(_file_to_inline_part(tile_in, "WHITEBOX"))
+                    if "whitebox" in layer_lower:
+                        input_desc = f"Input tile (layer={args.layer}, whitebox/structure guide): preserve geometry/camera/roads/building footprints."
+                    else:
+                        input_desc = (
+                            f"Input tile (layer={args.layer}, source/aerial): preserve road layout + building footprints, "
+                            "and keep local roof colors/materials (avoid homogenizing palette)."
+                        )
+                    parts.append({"text": input_desc})
+                    parts.extend(_file_to_inline_part(tile_in, "INPUT TILE"))
 
                     parts.append(
                         {
-                            "text": "Output: generate ONE stylized tile image for the WHITEBOX tile only. "
+                            "text": "Output: generate ONE stylized tile image corresponding to the INPUT TILE only. "
                             "Keep isometric camera, consistent lighting, and match the anchors' style. "
                             "Do not introduce new large objects that cross tile boundaries.",
                         }
