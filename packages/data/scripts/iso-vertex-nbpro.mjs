@@ -25,7 +25,7 @@ Vertex:
   --vertex_project        Vertex project (or env VERTEX_PROJECT)
   --vertex_location       Vertex location (default: global)
   --model                 Model id/resource (required)
-  --fallback_model        Fallback model (optional)
+  --fallback_model        Fallback model (optional, gemini-2.5 is disallowed in this repo)
 
 Generation:
   --k                     Candidates per tile (default: 4)
@@ -74,12 +74,12 @@ Examples:
     --tiles_dir=exports/iso_whitebox \\
     --layer=raw_whitebox \\
     --ref_tiles_dir=exports/iso_satellite \\
-    --ref_layer=raw_satellite \\
-    --x0=0 --y0=0 --w=4 --h=4 \\
-    --model=gemini-3-pro-image-preview --fallback_model=gemini-2.5-flash-image \\
-    --anchors_dir=exports/anchors/nbpro \\
-    --prompt_file=exports/prompts/nbpro.txt \\
-    --k=4 --overlap_px=48
+  --ref_layer=raw_satellite \\
+  --x0=0 --y0=0 --w=4 --h=4 \\
+  --model=gemini-3-pro-image-preview \\
+  --anchors_dir=exports/anchors/nbpro \\
+  --prompt_file=exports/prompts/nbpro.txt \\
+  --k=4 --overlap_px=48
 `);
 }
 
@@ -140,6 +140,16 @@ function normalizeBackend(raw) {
   if (!value) return 'vertex';
   if (value === 'vertex' || value === 'gemini') return value;
   throw new Error(`Unsupported --backend: ${raw}`);
+}
+
+function assertModelAllowed(flagName, modelId) {
+  const value = String(modelId || '')
+    .trim()
+    .toLowerCase();
+  if (!value) return;
+  if (value.includes('gemini-2.5')) {
+    throw new Error(`${flagName}=${modelId} is not allowed in this repository. Use gemini-3-pro-image-preview.`);
+  }
 }
 
 function parseNumber(args, key, fallback) {
@@ -221,6 +231,8 @@ export async function runIsoVertexNbpro({
   if (refLayer && !/^[a-zA-Z0-9._-]+$/.test(refLayer)) throw new Error(`Invalid --ref_layer: ${refLayer}`);
   if (!Number.isFinite(x0) || !Number.isFinite(y0)) throw new Error('Missing required --x0/--y0');
   if (!model || String(model).trim().length === 0) throw new Error('Missing required --model');
+  assertModelAllowed('--model', model);
+  assertModelAllowed('--fallback_model', fallbackModel);
 
   await loadDotenv({ repoRoot });
 

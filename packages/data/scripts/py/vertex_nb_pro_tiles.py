@@ -82,6 +82,14 @@ def _normalize_backend(raw):
     raise ValueError(f"Unsupported --backend: {raw}")
 
 
+def _assert_model_allowed(flag_name, model_id):
+    value = str(model_id or "").strip()
+    if not value:
+        return
+    if "gemini-2.5" in value.lower():
+        raise SystemExit(f"{flag_name}={value} is not allowed in this repository. Use gemini-3-pro-image-preview.")
+
+
 def _get_vertex_access_token():
     from_env = str(os.environ.get("VERTEX_ACCESS_TOKEN") or "").strip()
     if from_env:
@@ -500,6 +508,8 @@ def main():
     gemini_api_key = _get_gemini_api_key() if backend == "gemini" else ""
     model = str(args.model).strip()
     fallback_model = str(args.fallback_model or "").strip()
+    _assert_model_allowed("--model", model)
+    _assert_model_allowed("--fallback_model", fallback_model)
 
     cfg = {
         "temperature": float(args.temperature),

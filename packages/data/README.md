@@ -74,7 +74,6 @@ pnpm data:image:batch \
   --prompts_file=exports/prompts/batch.txt \
   --out_dir=exports/gemini_images \
   --model=gemini-3-pro-image-preview \
-  --fallback_model=gemini-2.5-flash-image \
   --image_size=2K \
   --aspect_ratio=1:1 \
   --temperature=0.45 \
@@ -90,7 +89,7 @@ pnpm data:image:batch \
 # - Optional thinking controls: --thinking_budget, --thinking_level, --include_thoughts
 # - For gemini-3-pro-image-preview, use VERTEX_LOCATION=global
 # - For IMAGE responses, --candidate_count>1 is emulated via repeated calls (variant seeds)
-# - If gemini-3-pro-image-preview returns 429 (Resource exhausted), keep fallback_model enabled
+# - gemini-2.5 models are intentionally blocked in this repository
 
 # Vertex Nano Banana Pro 4x4 pilot (tile-conditioned + seam scoring)
 # - Generates K candidates per tile
@@ -107,7 +106,6 @@ pnpm data:iso:vertex:nbpro \
   --x0=0 --y0=0 --w=4 --h=4 \
   --out_dir=exports/iso_nb_pro \
   --model=gemini-3-pro-image-preview \
-  --fallback_model=gemini-2.5-flash-image \
   --anchors_dir=exports/anchors/nbpro \
   --prompt_file=exports/prompts/nbpro.txt \
   --k=4 --overlap_px=48 --neighbor_mode=left+top \

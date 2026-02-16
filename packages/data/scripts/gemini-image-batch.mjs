@@ -21,7 +21,7 @@ Options:
   --out_dir             Output dir in run root (default: exports/gemini_images)
   --backend             gemini | vertex (default: env IMAGE_BACKEND or gemini)
   --model               Primary model id/resource (default: env IMAGE_MODEL or gemini-3-pro-image-preview)
-  --fallback_model      Fallback model (default: env IMAGE_FALLBACK_MODEL or gemini-2.5-flash-image)
+  --fallback_model      Fallback model (optional, disabled by default; pass none/off to disable explicitly)
   --prompt_prefix       Prefix for each prompt (default: "Create an image. ")
   --image_size          1K | 2K | 4K (optional)
   --aspect_ratio        e.g. 1:1, 16:9, 9:16 (optional)
@@ -180,6 +180,21 @@ function promptSlug(text, maxLen = 40) {
 function trimModelName(value, fallback) {
   const v = String(value ?? fallback ?? '').trim();
   return v || String(fallback || '').trim();
+}
+
+function isForbiddenModel(model) {
+  return String(model || '')
+    .trim()
+    .toLowerCase()
+    .includes('gemini-2.5');
+}
+
+function assertModelAllowed(flagName, model) {
+  const modelId = String(model || '').trim();
+  if (!modelId) return;
+  if (isForbiddenModel(modelId)) {
+    throw new Error(`${flagName}=${modelId} is not allowed in this repository. Use gemini-3-pro-image-preview.`);
+  }
 }
 
 async function readPrompts(filePath, maxPrompts) {
@@ -428,7 +443,7 @@ export async function generateImageBatch({
   outDirRel = 'exports/gemini_images',
   backend = 'gemini',
   model = 'gemini-3-pro-image-preview',
-  fallbackModel = 'gemini-2.5-flash-image',
+  fallbackModel = '',
   promptPrefix = 'Create an image. ',
   responseModalities = ['IMAGE'],
   imageSize = '',
@@ -455,6 +470,8 @@ export async function generateImageBatch({
     throw new Error('Missing required --prompts_file');
   }
   if (typeof outDirRel !== 'string' || outDirRel.length === 0) throw new Error('Invalid --out_dir');
+  assertModelAllowed('--model', model);
+  assertModelAllowed('--fallback_model', fallbackModel);
 
   const { runRoot, manifestPath } = getRunPaths(repoRoot, runId);
   if (!(await fileExists(manifestPath))) {
@@ -752,7 +769,7 @@ async function main() {
   const model = trimModelName(args.model, process.env.IMAGE_MODEL || 'gemini-3-pro-image-preview');
   const fallbackModelRaw = trimModelName(
     args.fallback_model ?? args.fallbackModel,
-    process.env.IMAGE_FALLBACK_MODEL || 'gemini-2.5-flash-image',
+    process.env.IMAGE_FALLBACK_MODEL || '',
   );
   const fallbackModel =
     fallbackModelRaw.toLowerCase() === 'none' || fallbackModelRaw.toLowerCase() === 'off' ? '' : fallbackModelRaw;
