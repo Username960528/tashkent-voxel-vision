@@ -19,6 +19,7 @@ Options:
   --ref_tiles_dir         Optional tiles dir for color reference (run-relative)
   --ref_layer             Input layer inside ref_tiles_dir for color reference (optional)
   --w --h                 Patch size in tiles. Default: 4x4
+  --backend               vertex|gemini (default: env IMAGE_BACKEND or vertex)
 
 Vertex:
   --vertex_project        Vertex project (or env VERTEX_PROJECT)
@@ -64,8 +65,9 @@ Mosaic:
 
 Examples:
   export IMAGE_BACKEND=vertex
-  export VERTEX_PROJECT=\"$(gcloud config get-value project)\"
+  export VERTEX_PROJECT="$(gcloud config get-value project)"
   export VERTEX_LOCATION=global
+  # For --backend=gemini, set GOOGLE_API_KEY.
 
   pnpm -C packages/data iso:vertex:nbpro \\
     --run_id=tashkent_local_2026-02-09 \\
@@ -131,6 +133,15 @@ function ensureRelPath(p) {
   return clean;
 }
 
+function normalizeBackend(raw) {
+  const value = String(raw || '')
+    .trim()
+    .toLowerCase();
+  if (!value) return 'vertex';
+  if (value === 'vertex' || value === 'gemini') return value;
+  throw new Error(`Unsupported --backend: ${raw}`);
+}
+
 function parseNumber(args, key, fallback) {
   const v = Number(args[key]);
   return Number.isFinite(v) ? v : fallback;
@@ -164,6 +175,7 @@ export async function runIsoVertexNbpro({
   y0,
   w = 4,
   h = 4,
+  backend = 'vertex',
   vertexProject = '',
   vertexLocation = 'global',
   model,
@@ -284,6 +296,8 @@ export async function runIsoVertexNbpro({
       String(Math.trunc(w)),
       '--h',
       String(Math.trunc(h)),
+      '--backend',
+      String(backend || 'vertex'),
       '--vertex_project',
       String(vertexProject || ''),
       '--vertex_location',
@@ -399,6 +413,7 @@ async function main() {
   const layer = typeof args.layer === 'string' ? args.layer : 'raw_whitebox';
   const refTilesDirRel = ensureRelPath(typeof args.ref_tiles_dir === 'string' ? args.ref_tiles_dir : args.refTilesDir) ?? '';
   const refLayer = typeof args.ref_layer === 'string' ? args.ref_layer : '';
+  const backend = normalizeBackend(typeof args.backend === 'string' ? args.backend : process.env.IMAGE_BACKEND || 'vertex');
 
   const repoRoot = (await findRepoRoot(process.cwd())) ?? process.cwd();
 
@@ -415,6 +430,7 @@ async function main() {
       y0: parseNumber(args, 'y0', NaN),
       w: parseNumber(args, 'w', 4),
       h: parseNumber(args, 'h', 4),
+      backend,
       vertexProject: typeof args.vertex_project === 'string' ? args.vertex_project : process.env.VERTEX_PROJECT || '',
       vertexLocation: typeof args.vertex_location === 'string' ? args.vertex_location : process.env.VERTEX_LOCATION || 'global',
       model: typeof args.model === 'string' ? args.model : '',

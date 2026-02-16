@@ -13,13 +13,15 @@ This is intended to answer: can we get “isometric.nyc-level” quality and wha
 
 ## Prereqs
 
-- `gcloud` installed and authenticated
-  - Either set `VERTEX_ACCESS_TOKEN`, or run:
-    - `gcloud auth application-default login`
-- Env (example):
+- Vertex backend (default):
+  - `gcloud` installed and authenticated
+  - Either set `VERTEX_ACCESS_TOKEN`, or run: `gcloud auth application-default login`
   - `export IMAGE_BACKEND=vertex`
   - `export VERTEX_PROJECT="$(gcloud config get-value project)"`
   - `export VERTEX_LOCATION=global`
+- Gemini backend (optional):
+  - `export IMAGE_BACKEND=gemini`
+  - `export GOOGLE_API_KEY=...`
 
 ## Inputs
 

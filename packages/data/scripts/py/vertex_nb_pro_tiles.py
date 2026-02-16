@@ -73,6 +73,15 @@ def _backoff_ms(attempt, base_ms, max_ms, jitter_ms):
     return delay
 
 
+def _normalize_backend(raw):
+    value = str(raw or "").strip().lower()
+    if not value:
+        return "vertex"
+    if value in ("vertex", "gemini"):
+        return value
+    raise ValueError(f"Unsupported --backend: {raw}")
+
+
 def _get_vertex_access_token():
     from_env = str(os.environ.get("VERTEX_ACCESS_TOKEN") or "").strip()
     if from_env:
@@ -97,6 +106,13 @@ def _get_vertex_access_token():
     )
 
 
+def _get_gemini_api_key():
+    from_env = str(os.environ.get("GOOGLE_API_KEY") or "").strip()
+    if from_env:
+        return from_env
+    raise RuntimeError("Missing GOOGLE_API_KEY for gemini backend")
+
+
 def _build_vertex_url(model, project, location):
     loc = str(location or "").strip() or "us-central1"
     model_res = str(model or "").strip()
@@ -115,16 +131,33 @@ def _build_vertex_url(model, project, location):
     return f"https://{host}/v1/{model_res}:generateContent"
 
 
-def _post_json(url, payload, *, access_token, timeout_ms):
+def _build_gemini_url(model, gemini_api_key):
+    model_id = str(model or "").strip()
+    if not model_id:
+        raise ValueError("Missing model")
+    if model_id.startswith("projects/"):
+        raise ValueError("Gemini backend requires model id (for example: gemini-3-pro-image-preview)")
+    if model_id.startswith("models/"):
+        model_id = model_id.split("/", 1)[1]
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={gemini_api_key}"
+
+
+def _build_generate_url(backend, model, *, vertex_project, vertex_location, gemini_api_key):
+    if backend == "gemini":
+        return _build_gemini_url(model, gemini_api_key)
+    return _build_vertex_url(model, vertex_project, vertex_location)
+
+
+def _post_json(url, payload, *, headers, timeout_ms):
     body = json.dumps(payload).encode("utf-8")
+    req_headers = {"Content-Type": "application/json"}
+    if isinstance(headers, dict):
+        req_headers.update(headers)
     req = urllib.request.Request(
         url,
         data=body,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-        },
+        headers=req_headers,
     )
     with urllib.request.urlopen(req, timeout=max(1, int(timeout_ms)) / 1000.0) as resp:
         raw = resp.read()
@@ -135,7 +168,7 @@ def _post_json_with_retries(
     url,
     payload,
     *,
-    access_token,
+    headers,
     timeout_ms,
     retry_max,
     retry_base_ms,
@@ -147,7 +180,7 @@ def _post_json_with_retries(
     attempt = 0
     while True:
         try:
-            return _post_json(url, payload, access_token=access_token, timeout_ms=timeout_ms)
+            return _post_json(url, payload, headers=headers, timeout_ms=timeout_ms)
         except urllib.error.HTTPError as e:
             status = int(getattr(e, "code", 0) or 0)
             text = ""
@@ -200,7 +233,7 @@ def _extract_inline_images(data):
                 # For this pilot we need bytes on disk. If the model returns file URIs (e.g. GCS),
                 # we would need an authenticated download path; treat as an error for now.
                 uri = file_data.get("fileUri") or file_data.get("file_uri")
-                raise RuntimeError(f"Vertex returned fileUri instead of inline bytes: {uri}")
+                raise RuntimeError(f"Model returned fileUri instead of inline bytes: {uri}")
 
     raise RuntimeError("No image data in response")
 
@@ -299,7 +332,7 @@ def _read_json(path):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Vertex Nano Banana Pro 4x4 pilot: K candidates per tile + seam scoring.")
+    ap = argparse.ArgumentParser(description="NB Pro 4x4 pilot: K candidates per tile + seam scoring (vertex|gemini).")
 
     ap.add_argument("--run_id", required=True)
     ap.add_argument("--run_root", required=True, help="Absolute run root (data/releases/<run_id>)")
@@ -314,6 +347,7 @@ def main():
     ap.add_argument("--w", type=int, default=4)
     ap.add_argument("--h", type=int, default=4)
 
+    ap.add_argument("--backend", default="vertex", help="vertex|gemini (default: vertex)")
     ap.add_argument("--vertex_project", default="")
     ap.add_argument("--vertex_location", default="global")
     ap.add_argument("--model", required=True)
@@ -460,8 +494,10 @@ def main():
     structure_downscale_px = int(args.structure_downscale_px)
     fallback_penalty = float(args.fallback_penalty)
 
+    backend = _normalize_backend(args.backend)
     vertex_project = str(args.vertex_project or "").strip() or str(os.environ.get("VERTEX_PROJECT") or "").strip()
     vertex_location = str(args.vertex_location or "").strip() or str(os.environ.get("VERTEX_LOCATION") or "global").strip()
+    gemini_api_key = _get_gemini_api_key() if backend == "gemini" else ""
     model = str(args.model).strip()
     fallback_model = str(args.fallback_model or "").strip()
 
@@ -473,7 +509,10 @@ def main():
         "response_modalities": ["IMAGE"],
         "candidate_count": 1,
     }
-    params_hash = _sha256_text(json.dumps({"vertex": {"project": vertex_project, "location": vertex_location}, "cfg": cfg}, sort_keys=True))
+    params_payload = {"backend": backend, "cfg": cfg}
+    if backend == "vertex":
+        params_payload["vertex"] = {"project": vertex_project, "location": vertex_location}
+    params_hash = _sha256_text(json.dumps(params_payload, sort_keys=True))
 
     out_tiles_dir = os.path.join(out_dir, "tiles")
     out_candidates_dir = os.path.join(out_dir, "candidates")
@@ -521,6 +560,7 @@ def main():
         "ref_layer": str(ref_layer) if ref_enabled else None,
         "ref_sample_tile": _relpath_if_under(run_root, sample_ref) if ref_enabled else None,
         "ref_sample_tile_sha256": str(ref_sample_sha256) if ref_enabled else None,
+        "backend": backend,
         "subgrid": {"x0": int(args.x0), "y0": int(args.y0), "w": int(args.w), "h": int(args.h)},
         "vertex": {
             "project": vertex_project,
@@ -689,8 +729,10 @@ def main():
 
                 def _cache_key(model_used):
                     payload = dict(gen_common)
+                    payload["backend"] = backend
                     payload["model"] = str(model_used)
-                    payload["vertex"] = {"project": vertex_project, "location": vertex_location}
+                    if backend == "vertex":
+                        payload["vertex"] = {"project": vertex_project, "location": vertex_location}
                     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
                 used_model = model
@@ -773,12 +815,21 @@ def main():
                     payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": generation_config}
 
                     def _call_model(model_used):
-                        url = _build_vertex_url(model_used, vertex_project, vertex_location)
+                        url = _build_generate_url(
+                            backend,
+                            model_used,
+                            vertex_project=vertex_project,
+                            vertex_location=vertex_location,
+                            gemini_api_key=gemini_api_key,
+                        )
+                        headers = {"Content-Type": "application/json"}
+                        if backend == "vertex":
+                            # Long runs can exceed the lifetime of a single access token; re-fetch per request.
+                            headers["Authorization"] = f"Bearer {_get_vertex_access_token()}"
                         return _post_json_with_retries(
                             url,
                             payload,
-                            # Long runs can exceed the lifetime of a single access token; re-fetch per request.
-                            access_token=_get_vertex_access_token(),
+                            headers=headers,
                             timeout_ms=args.timeout_ms,
                             retry_max=args.retry_max,
                             retry_base_ms=args.retry_base_ms,
@@ -1021,6 +1072,7 @@ def main():
         "ref_sample_tile_sha256": str(ref_sample_sha256) if ref_enabled else None,
         "out_dir": _relpath_if_under(run_root, out_dir),
         "config_hash": run_config_hash,
+        "backend": backend,
         "vertex": {
             "project": vertex_project,
             "location": vertex_location,

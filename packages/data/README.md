@@ -97,6 +97,7 @@ pnpm data:image:batch \
 # - Scores seams vs already accepted neighbors + structure-fidelity vs input tile, selects best
 # - Outputs under exports/iso_nb_pro/: tiles/ + mosaic_nb_pro.png + report_nb_pro.json + seam_heatmap_nb_pro.png
 # - Tip (stylize from real tiles): consider `--neighbors_in_prompt=0` to reduce prompt-induced style collapse
+# - Backend defaults to vertex; use --backend=gemini with GOOGLE_API_KEY for Gemini API backend
 pnpm data:iso:vertex:nbpro \
   --run_id=tashkent_2026-02-07 \
   --tiles_dir=exports/iso_whitebox \
