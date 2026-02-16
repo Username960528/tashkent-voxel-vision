@@ -27,6 +27,9 @@ from seam_score import (
 
 PROMPT_LAYOUT_VERSION = 2
 
+_VERTEX_ACCESS_TOKEN_TTL_SEC = 50 * 60
+_VERTEX_ACCESS_TOKEN_CACHE = {"token": None, "ts": 0.0}
+
 
 def _ensure_dir(p):
     os.makedirs(p, exist_ok=True)
@@ -90,10 +93,45 @@ def _assert_model_allowed(flag_name, model_id):
         raise SystemExit(f"{flag_name}={value} is not allowed in this repository. Use gemini-3-pro-image-preview.")
 
 
-def _get_vertex_access_token():
+def _get_vertex_access_token(*, force_refresh=False):
     from_env = str(os.environ.get("VERTEX_ACCESS_TOKEN") or "").strip()
     if from_env:
         return from_env
+
+    now = time.time()
+    cached = _VERTEX_ACCESS_TOKEN_CACHE.get("token")
+    cached_ts = float(_VERTEX_ACCESS_TOKEN_CACHE.get("ts") or 0.0)
+    if (not force_refresh) and cached and (now - cached_ts) < float(_VERTEX_ACCESS_TOKEN_TTL_SEC):
+        return cached
+
+    token_cmd = str(os.environ.get("VERTEX_ACCESS_TOKEN_CMD") or "").strip()
+    if token_cmd:
+        try:
+            raw = (
+                subprocess.check_output(
+                    token_cmd,
+                    shell=True,
+                    stderr=subprocess.STDOUT,
+                    timeout=15,
+                )
+                .decode("utf-8", errors="replace")
+            )
+            lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+            out = lines[-1] if lines else ""
+            if not out:
+                raise RuntimeError("VERTEX_ACCESS_TOKEN_CMD returned empty token")
+            _VERTEX_ACCESS_TOKEN_CACHE["token"] = out
+            _VERTEX_ACCESS_TOKEN_CACHE["ts"] = now
+            return out
+        except RuntimeError:
+            raise
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("VERTEX_ACCESS_TOKEN_CMD timed out") from None
+        except subprocess.CalledProcessError as e:
+            code = int(getattr(e, "returncode", 0) or 0)
+            raise RuntimeError(f"VERTEX_ACCESS_TOKEN_CMD failed (exit status {code})") from None
+        except Exception:
+            raise RuntimeError("VERTEX_ACCESS_TOKEN_CMD failed") from None
 
     attempts = [
         ["gcloud", "auth", "application-default", "print-access-token"],
@@ -102,8 +140,12 @@ def _get_vertex_access_token():
     errors = []
     for cmd in attempts:
         try:
-            out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=15).decode("utf-8").strip()
+            raw = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=15).decode("utf-8", errors="replace")
+            lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+            out = lines[-1] if lines else ""
             if out:
+                _VERTEX_ACCESS_TOKEN_CACHE["token"] = out
+                _VERTEX_ACCESS_TOKEN_CACHE["ts"] = now
                 return out
             errors.append(" ".join(cmd) + " returned empty token")
         except Exception as e:
@@ -834,20 +876,40 @@ def main():
                         )
                         headers = {"Content-Type": "application/json"}
                         if backend == "vertex":
-                            # Long runs can exceed the lifetime of a single access token; re-fetch per request.
+                            # Long runs can exceed the lifetime of a single access token; refresh on a schedule and on 401.
                             headers["Authorization"] = f"Bearer {_get_vertex_access_token()}"
-                        return _post_json_with_retries(
-                            url,
-                            payload,
-                            headers=headers,
-                            timeout_ms=args.timeout_ms,
-                            retry_max=args.retry_max,
-                            retry_base_ms=args.retry_base_ms,
-                            retry_max_ms=args.retry_max_ms,
-                            retry_jitter_ms=args.retry_jitter_ms,
-                            debug_retries=bool(int(args.debug_retries)),
-                            purpose="image_generate",
-                        )
+                        try:
+                            return _post_json_with_retries(
+                                url,
+                                payload,
+                                headers=headers,
+                                timeout_ms=args.timeout_ms,
+                                retry_max=args.retry_max,
+                                retry_base_ms=args.retry_base_ms,
+                                retry_max_ms=args.retry_max_ms,
+                                retry_jitter_ms=args.retry_jitter_ms,
+                                debug_retries=bool(int(args.debug_retries)),
+                                purpose="image_generate",
+                            )
+                        except RuntimeError as e:
+                            if backend == "vertex":
+                                cause = getattr(e, "__cause__", None)
+                                status = int(getattr(cause, "code", 0) or 0)
+                                if status == 401:
+                                    headers["Authorization"] = f"Bearer {_get_vertex_access_token(force_refresh=True)}"
+                                    return _post_json_with_retries(
+                                        url,
+                                        payload,
+                                        headers=headers,
+                                        timeout_ms=args.timeout_ms,
+                                        retry_max=args.retry_max,
+                                        retry_base_ms=args.retry_base_ms,
+                                        retry_max_ms=args.retry_max_ms,
+                                        retry_jitter_ms=args.retry_jitter_ms,
+                                        debug_retries=bool(int(args.debug_retries)),
+                                        purpose="image_generate",
+                                    )
+                            raise
 
                     data = None
                     try:
