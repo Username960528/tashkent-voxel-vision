@@ -129,6 +129,18 @@ export async function runIsoWhiteboxSeamSmoke({
   const pixelLayerGlobal = 'pixel_whitebox_seam_global';
   const useGlobalPass = Number(globalPass) !== 0;
   const usePostGlobalSeamPass = useGlobalPass && Number(postGlobalSeamPass) !== 0;
+  const pixelZoomPreset = {
+    pixelScale: 0.18,
+    palette: 72,
+    dither: true,
+    edgeThreshold: 96,
+    edgeAlpha: 0.35,
+    edgeThickness: 1,
+    maxEdgeCoverage: 0.32,
+    edgeDarkMinLuma: 120,
+    contrast: 1.15,
+    saturation: 1.08,
+  };
 
   const rawMosaicOut = `${tilesDirRel}/mosaic_raw_whitebox.png`;
   const sdMosaicOut = `${tilesDirRel}/mosaic_sd_whitebox.png`;
@@ -325,12 +337,8 @@ export async function runIsoWhiteboxSeamSmoke({
     runId,
     inDirRel: `${tilesDirRel}/${seamLayer}`,
     outDirRel: `${tilesDirRel}/${pixelLayerSeam}`,
-    pixelScale: 0.22,
-    palette: 64,
-    dither: true,
-    edgeThreshold: 112,
-    edgeAlpha: 0.28,
-    edgeThickness: 1,
+    ...pixelZoomPreset,
+    edgeBorderStrip: 6,
     maxImages,
   });
   const pixelMosaicSeam = await buildIsoMosaic({
@@ -353,12 +361,8 @@ export async function runIsoWhiteboxSeamSmoke({
       runId,
       inDirRel: `${tilesDirRel}/${finalSdLayer}`,
       outDirRel: `${tilesDirRel}/${pixelLayerGlobal}`,
-      pixelScale: 0.22,
-      palette: 64,
-      dither: true,
-      edgeThreshold: 112,
-      edgeAlpha: 0.28,
-      edgeThickness: 1,
+      ...pixelZoomPreset,
+      edgeBorderStrip: 4,
       maxImages,
     });
 

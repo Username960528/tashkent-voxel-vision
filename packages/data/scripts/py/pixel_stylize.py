@@ -32,6 +32,7 @@ def _stylize(
     edge_dark_min_luma,
     contrast,
     saturation,
+    edge_border_strip,
 ):
     if img.mode not in ("RGB", "RGBA"):
         img = img.convert("RGBA")
@@ -103,6 +104,14 @@ def _stylize(
         dark_arr = np.array(dark, dtype=np.uint8)
         mask_arr = np.where((mask_arr > 0) & (dark_arr > 0), 255, 0).astype(np.uint8)
 
+    border = max(0, int(edge_border_strip))
+    if border > 0:
+        border = min(border, h // 2, w // 2)
+        if border > 0:
+            mask_arr[:border, :] = 0
+            mask_arr[-border:, :] = 0
+            mask_arr[:, :border] = 0
+            mask_arr[:, -border:] = 0
     mask = Image.fromarray(mask_arr, mode="L")
     ink = Image.new("RGBA", (w, h), (INK[0], INK[1], INK[2], int(round(255.0 * _clamp01(edge_alpha)))))
     out = Image.composite(ink, up, mask)
@@ -138,6 +147,12 @@ def main():
         default=100,
         help="Only draw edges where quantized luminance <= this value (0..255, default: 100)",
     )
+    ap.add_argument(
+        "--edge_border_strip",
+        type=int,
+        default=0,
+        help="Suppress outlines within this many pixels of the tile border (default: 0)",
+    )
 
     ap.add_argument("--contrast", type=float, default=1.10, help="Pre-quantize contrast boost (default: 1.10)")
     ap.add_argument("--saturation", type=float, default=1.05, help="Pre-quantize saturation boost (default: 1.05)")
@@ -161,6 +176,8 @@ def main():
         raise SystemExit("--contrast must be > 0")
     if not math.isfinite(args.saturation) or args.saturation <= 0:
         raise SystemExit("--saturation must be > 0")
+    if args.edge_border_strip < 0:
+        raise SystemExit("--edge_border_strip must be >= 0")
 
     in_path = args.in_png
     out_path = args.out_png
@@ -182,6 +199,7 @@ def main():
         edge_dark_min_luma=args.edge_dark_min_luma,
         contrast=args.contrast,
         saturation=args.saturation,
+        edge_border_strip=args.edge_border_strip,
     )
 
     out.save(out_path, "PNG")
@@ -202,6 +220,7 @@ def main():
         "edge_dark_min_luma": int(args.edge_dark_min_luma),
         "contrast": float(args.contrast),
         "saturation": float(args.saturation),
+        "edge_border_strip": int(args.edge_border_strip),
     }
 
     if args.report_json:
