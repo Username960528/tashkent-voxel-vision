@@ -168,7 +168,8 @@ def main():
         raise SystemExit(f"missing input: {in_path}")
 
     _ensure_dir(os.path.dirname(os.path.abspath(out_path)))
-    img = Image.open(in_path)
+    with Image.open(in_path) as _src:
+        img = _src.convert("RGBA")
 
     out, edge_debug = _stylize(
         img,

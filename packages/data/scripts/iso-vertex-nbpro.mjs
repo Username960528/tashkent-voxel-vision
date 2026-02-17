@@ -53,6 +53,7 @@ Scoring:
   --structure_weight      Weight for structure-fidelity score (default: 0.75)
   --structure_downscale_px  Downscale px for structure scoring (default: 128)
   --structure_weights     JSON string or path to JSON file (optional)
+  --color_weight          Weight for color fidelity vs reference tile (default: 0.0)
   --fallback_penalty      Additive penalty when fallback model is used (default: 0.05)
 
 Cache:
@@ -203,6 +204,7 @@ export async function runIsoVertexNbpro({
   overlapPx = 48,
   scoreWeights = '',
   structureWeight = 0.75,
+  colorWeight = 0.0,
   structureDownscalePx = 128,
   structureWeights = '',
   fallbackPenalty = 0.05,
@@ -343,6 +345,8 @@ export async function runIsoVertexNbpro({
       '--structure_downscale_px',
       String(Math.trunc(structureDownscalePx)),
       ...(structureWeights ? ['--structure_weights', String(structureWeights)] : []),
+      '--color_weight',
+      String(colorWeight),
       '--fallback_penalty',
       String(fallbackPenalty),
       '--cache_dir',
@@ -460,6 +464,7 @@ async function main() {
       overlapPx: parseNumber(args, 'overlap_px', 48),
       scoreWeights: typeof args.score_weights === 'string' ? args.score_weights : '',
       structureWeight: parseNumber(args, 'structure_weight', 0.75),
+      colorWeight: parseNumber(args, 'color_weight', 0.0),
       structureDownscalePx: parseNumber(args, 'structure_downscale_px', 128),
       structureWeights: typeof args.structure_weights === 'string' ? args.structure_weights : '',
       fallbackPenalty: parseNumber(args, 'fallback_penalty', 0.05),

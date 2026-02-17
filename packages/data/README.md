@@ -89,7 +89,7 @@ pnpm data:image:batch \
 # - Optional thinking controls: --thinking_budget, --thinking_level, --include_thoughts
 # - For gemini-3-pro-image-preview, use VERTEX_LOCATION=global
 # - For IMAGE responses, --candidate_count>1 is emulated via repeated calls (variant seeds)
-# - gemini-2.5 models are intentionally blocked in this repository
+# - Legacy Gemini 2.x models are intentionally blocked in this repository
 
 # Vertex Nano Banana Pro 4x4 pilot (tile-conditioned + seam scoring)
 # - Generates K candidates per tile

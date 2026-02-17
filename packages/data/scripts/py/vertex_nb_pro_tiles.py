@@ -30,6 +30,8 @@ PROMPT_LAYOUT_VERSION = 2
 _VERTEX_ACCESS_TOKEN_TTL_SEC = 50 * 60
 _VERTEX_ACCESS_TOKEN_CACHE = {"token": None, "ts": 0.0}
 
+COLOR_FIDELITY_WEIGHTS = {"rgb_l1": 1.0, "rgb_l2": 0.0, "sobel_l1": 0.0}
+
 
 def _ensure_dir(p):
     os.makedirs(p, exist_ok=True)
@@ -424,6 +426,12 @@ def main():
     ap.add_argument("--structure_weight", type=float, default=0.75)
     ap.add_argument("--structure_downscale_px", type=int, default=128)
     ap.add_argument("--structure_weights", default="")
+    ap.add_argument(
+        "--color_weight",
+        type=float,
+        default=0.0,
+        help="Weight for color fidelity vs the reference tile (only used when --ref_tiles_dir/--ref_layer are provided).",
+    )
     ap.add_argument("--fallback_penalty", type=float, default=0.05)
 
     ap.add_argument("--cache_dir", default=".cache/vertex_nb_pro")
@@ -475,6 +483,8 @@ def main():
         raise SystemExit("--structure_downscale_px must be > 0")
     if not math.isfinite(float(args.structure_weight)) or float(args.structure_weight) < 0.0:
         raise SystemExit("--structure_weight must be >= 0")
+    if not math.isfinite(float(args.color_weight)) or float(args.color_weight) < 0.0:
+        raise SystemExit("--color_weight must be >= 0")
     if not math.isfinite(float(args.fallback_penalty)) or float(args.fallback_penalty) < 0.0:
         raise SystemExit("--fallback_penalty must be >= 0")
 
@@ -504,8 +514,14 @@ def main():
         prompt_guardrails_lines.insert(
             1, "- Preserve per-building roof colors/materials from the COLOR REFERENCE tile; avoid homogenizing everything."
         )
+        prompt_guardrails_lines.insert(
+            2,
+            "- Lean on the COLOR REFERENCE to keep Tashkent-specific turquoise/mint/blue roofs instead of drifting toward generic browns.",
+        )
     elif "whitebox" not in layer_lower:
-        prompt_guardrails_lines.insert(1, "- Preserve per-building roof colors/materials from the input tile; avoid homogenizing everything.")
+        prompt_guardrails_lines.insert(
+            1, "- Preserve per-building roof colors/materials from the input tile; avoid homogenizing everything."
+        )
     prompt_guardrails = "\n".join(prompt_guardrails_lines).strip()
     prompt_guardrails_hash = _sha256_text(prompt_guardrails) if prompt_guardrails else ""
 
@@ -533,16 +549,17 @@ def main():
             structure_weights_raw = json.loads(_read_text(raw))
         else:
             raise SystemExit(f"--structure_weights must be a JSON string or existing file path: {raw}")
-    # For satellite/raw tiles, bias selection harder towards color/texture fidelity so we don't collapse
-    # into a single "safe" roof palette just to minimize seam diffs.
+    # For satellite/raw tiles (or when a COLOR REFERENCE is provided), bias selection harder towards
+    # color/texture fidelity so we don't collapse into a single "safe" roof palette just to minimize seams.
     default_structure_weights = {"rgb_l1": 0.15, "rgb_l2": 0.0, "sobel_l1": 1.0}
-    if "whitebox" not in layer_lower:
+    if ref_enabled or ("whitebox" not in layer_lower):
         default_structure_weights = {"rgb_l1": 1.0, "rgb_l2": 0.0, "sobel_l1": 0.5}
     structure_weights_norm = normalize_weights(structure_weights_raw, default=default_structure_weights)
 
     structure_weight = float(args.structure_weight)
     structure_downscale_px = int(args.structure_downscale_px)
     fallback_penalty = float(args.fallback_penalty)
+    color_weight = float(args.color_weight)
 
     backend = _normalize_backend(args.backend)
     vertex_project = str(args.vertex_project or "").strip() or str(os.environ.get("VERTEX_PROJECT") or "").strip()
@@ -637,6 +654,8 @@ def main():
         "structure_weight": structure_weight,
         "structure_downscale_px": structure_downscale_px,
         "structure_weights": structure_weights_norm,
+        "color_weight": float(color_weight),
+        "color_fidelity_weights": COLOR_FIDELITY_WEIGHTS,
         "fallback_penalty": fallback_penalty,
     }
     run_config_hash = _sha256_text(json.dumps(run_config, sort_keys=True))
@@ -687,6 +706,9 @@ def main():
                 if not os.path.isfile(ref_tile_in):
                     raise SystemExit(f"missing ref tile in patch: {ref_tile_in}")
                 ref_tile_hash = sha256_file(ref_tile_in)
+            ref_rgb = None
+            if ref_enabled:
+                ref_rgb, _ = load_rgb(ref_tile_in, target_size=target_size)
 
             tile_out = _selected_path(x, y)
             _ensure_dir(os.path.dirname(tile_out))
@@ -716,10 +738,20 @@ def main():
             # Include the input tile hash in cache keys so cache is safe across runs/updates.
             tile_in_hash = sha256_file(tile_in)
             tile_in_rgb, _ = load_rgb(tile_in, target_size=target_size)
-            tile_in_rgb_struct = None
+
+            # Structure scoring reference:
+            # - by default compare candidate vs INPUT TILE (good for raw/satellite input)
+            # - when COLOR REFERENCE is provided (typically raw/satellite), compare candidate vs that reference
+            struct_ref_rgb = tile_in_rgb
+            struct_ref_kind = "input"
+            if ref_enabled and ref_rgb is not None:
+                struct_ref_rgb = ref_rgb
+                struct_ref_kind = "ref"
+
+            struct_ref_rgb_struct = None
             if structure_weight > 0.0:
-                tile_in_rgb_struct = _resize_rgb_array(
-                    tile_in_rgb,
+                struct_ref_rgb_struct = _resize_rgb_array(
+                    struct_ref_rgb,
                     out_size=(structure_downscale_px, structure_downscale_px),
                 )
 
@@ -758,6 +790,7 @@ def main():
             best_structure_score = None
             best_model_used = None
             best_fallback_penalty = 0.0
+            best_color_score = None
 
             for vi in range(int(args.k)):
                 seed = _pick_seed(args.seed_mode, args.seed_base, x, y, vi)
@@ -953,6 +986,8 @@ def main():
                     "path": _relpath_if_under(run_root, cand_png),
                     "seam_score": None,
                     "metrics": None,
+                    "color_score": None,
+                    "color_metrics": None,
                     "latency_ms": latency_ms,
                     "cached": bool(cached),
                     "model_used": used_model,
@@ -976,23 +1011,41 @@ def main():
 
                     structure_score = 0.0
                     structure_metrics = None
-                    if structure_weight > 0.0 and tile_in_rgb_struct is not None:
+                    if structure_weight > 0.0 and struct_ref_rgb_struct is not None:
                         cand_rgb_struct = _resize_rgb_array(
                             cand_rgb,
                             out_size=(structure_downscale_px, structure_downscale_px),
                         )
                         structure_score, structure_metrics = score_pair(
-                            tile_in_rgb_struct,
+                            struct_ref_rgb_struct,
                             cand_rgb_struct,
                             weights=structure_weights_norm,
                         )
                     cand_entry["structure_score"] = float(structure_score) if structure_weight > 0.0 else None
                     cand_entry["structure_metrics"] = structure_metrics
+                    cand_entry["structure_ref"] = struct_ref_kind
+
+                    color_score = None
+                    color_metrics = None
+                    if ref_enabled and ref_rgb is not None:
+                        color_score, color_metrics = score_pair(
+                            ref_rgb,
+                            cand_rgb,
+                            weights=COLOR_FIDELITY_WEIGHTS,
+                        )
+                    cand_entry["color_score"] = float(color_score) if color_score is not None else None
+                    cand_entry["color_metrics"] = color_metrics
 
                     applied_fallback_penalty = fallback_penalty if used_model != model else 0.0
                     cand_entry["fallback_penalty"] = float(applied_fallback_penalty)
 
-                    total_score = seam_score + structure_weight * float(structure_score) + float(applied_fallback_penalty)
+                    color_component = color_weight * float(color_score) if color_score is not None else 0.0
+                    total_score = (
+                        seam_score
+                        + structure_weight * float(structure_score)
+                        + float(applied_fallback_penalty)
+                        + color_component
+                    )
                     cand_entry["total_score"] = float(total_score)
 
                     if best_total_score is None or total_score < best_total_score:
@@ -1003,6 +1056,7 @@ def main():
                         best_structure_score = float(structure_score) if structure_weight > 0.0 else None
                         best_model_used = used_model
                         best_fallback_penalty = float(applied_fallback_penalty)
+                        best_color_score = float(color_score) if color_score is not None else None
 
                 tile_entry["candidates"].append(cand_entry)
 
@@ -1023,6 +1077,7 @@ def main():
                 "structure_score": float(best_structure_score) if best_structure_score is not None else None,
                 "model_used": best_model_used,
                 "fallback_penalty": float(best_fallback_penalty),
+                "color_score": float(best_color_score) if best_color_score is not None else None,
                 "cached": False,
             }
             tiles_report.append(tile_entry)
@@ -1165,6 +1220,10 @@ def main():
             "weight": float(structure_weight),
             "downscale_px": int(structure_downscale_px),
             "weights": structure_weights_norm,
+        },
+        "color": {
+            "weight": float(color_weight),
+            "weights": COLOR_FIDELITY_WEIGHTS,
         },
         "fallback_penalty": float(fallback_penalty),
         "tiles": tiles_report,

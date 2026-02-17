@@ -54,7 +54,6 @@ pnpm -C packages/data iso:vertex:nbpro \
   --x0=0 --y0=0 --w=4 --h=4 \
   --out_dir=exports/iso_nb_pro \
   --model=gemini-3-pro-image-preview \
-  --fallback_model=gemini-2.5-flash-image \
   --anchors_dir=exports/anchors/nbpro \
   --prompt_file=exports/prompts/nbpro.txt \
   --negative_prompt_file=exports/prompts/nbpro_negative.txt \
