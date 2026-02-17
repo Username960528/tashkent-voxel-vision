@@ -91,7 +91,7 @@ def _assert_model_allowed(flag_name, model_id):
     value = str(model_id or "").strip()
     if not value:
         return
-    if "gemini-2.5" in value.lower():
+    if "gemini-2." in value.lower():
         raise SystemExit(f"{flag_name}={value} is not allowed in this repository. Use gemini-3-pro-image-preview.")
 
 

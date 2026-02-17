@@ -25,7 +25,7 @@ Vertex:
   --vertex_project        Vertex project (or env VERTEX_PROJECT)
   --vertex_location       Vertex location (default: global)
   --model                 Model id/resource (required)
-  --fallback_model        Fallback model (optional, gemini-2.5 is disallowed in this repo)
+  --fallback_model        Fallback model (optional, gemini-2.x is disallowed in this repo)
 
 Generation:
   --k                     Candidates per tile (default: 4)
@@ -148,7 +148,7 @@ function assertModelAllowed(flagName, modelId) {
     .trim()
     .toLowerCase();
   if (!value) return;
-  if (value.includes('gemini-2.5')) {
+  if (value.includes('gemini-2.')) {
     throw new Error(`${flagName}=${modelId} is not allowed in this repository. Use gemini-3-pro-image-preview.`);
   }
 }
