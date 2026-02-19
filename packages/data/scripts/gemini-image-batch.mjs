@@ -13,6 +13,9 @@ import { findRepoRoot } from './lib/repo-root.mjs';
 
 const execFileAsync = promisify(execFile);
 
+const VERTEX_ACCESS_TOKEN_TTL_MS = 50 * 60 * 1000;
+const vertexTokenCache = { token: '', tsMs: 0 };
+
 function printHelp() {
   console.log(`Usage:
   pnpm data:image:batch --run_id=<id> --prompts_file=<run-rel-file> [options]
@@ -21,7 +24,7 @@ Options:
   --out_dir             Output dir in run root (default: exports/gemini_images)
   --backend             gemini | vertex (default: env IMAGE_BACKEND or gemini)
   --model               Primary model id/resource (default: env IMAGE_MODEL or gemini-3-pro-image-preview)
-  --fallback_model      Fallback model (default: env IMAGE_FALLBACK_MODEL or gemini-2.5-flash-image)
+  --fallback_model      Fallback model (optional, disabled by default; pass none/off to disable explicitly)
   --prompt_prefix       Prefix for each prompt (default: "Create an image. ")
   --image_size          1K | 2K | 4K (optional)
   --aspect_ratio        e.g. 1:1, 16:9, 9:16 (optional)
@@ -50,6 +53,7 @@ Environment:
     VERTEX_PROJECT (required if model is not a full resource path)
     VERTEX_LOCATION (required if model is not a full resource path, default: us-central1)
     VERTEX_ACCESS_TOKEN (optional, otherwise script tries gcloud auth commands)
+    VERTEX_ACCESS_TOKEN_CMD (optional, shell command that prints an access token; overrides gcloud)
 
 Prompts file format:
   - One prompt per line
@@ -182,6 +186,21 @@ function trimModelName(value, fallback) {
   return v || String(fallback || '').trim();
 }
 
+function isForbiddenModel(model) {
+  return String(model || '')
+    .trim()
+    .toLowerCase()
+    .includes('gemini-2.');
+}
+
+function assertModelAllowed(flagName, model) {
+  const modelId = String(model || '').trim();
+  if (!modelId) return;
+  if (isForbiddenModel(modelId)) {
+    throw new Error(`${flagName}=${modelId} is not allowed in this repository. Use gemini-3-pro-image-preview.`);
+  }
+}
+
 async function readPrompts(filePath, maxPrompts) {
   const raw = await fs.readFile(filePath, 'utf8');
   const prompts = raw
@@ -246,9 +265,49 @@ function extractImagesFromResponse(data) {
   throw new Error('No image data in response');
 }
 
-async function getVertexAccessToken() {
+async function getVertexAccessToken({ forceRefresh = false } = {}) {
   const fromEnv = String(process.env.VERTEX_ACCESS_TOKEN || '').trim();
   if (fromEnv) return fromEnv;
+
+  const now = Date.now();
+  if (!forceRefresh && vertexTokenCache.token && now - vertexTokenCache.tsMs < VERTEX_ACCESS_TOKEN_TTL_MS) {
+    return vertexTokenCache.token;
+  }
+
+  const tokenCmd = String(process.env.VERTEX_ACCESS_TOKEN_CMD || '').trim();
+  if (tokenCmd) {
+    const candidates = [];
+    const envShell = String(process.env.SHELL || '').trim();
+    if (envShell) candidates.push(envShell);
+    candidates.push('/bin/bash', '/usr/bin/bash', '/bin/sh');
+    let shellBin = 'bash';
+    for (const c of candidates) {
+      if (await fileExists(c)) {
+        shellBin = c;
+        break;
+      }
+    }
+
+    try {
+      const { stdout, stderr } = await execFileAsync(shellBin, ['-c', tokenCmd], {
+        timeout: 15000,
+        maxBuffer: 1024 * 1024,
+      });
+      const combined = `${String(stdout || '')}\n${String(stderr || '')}`;
+      const lines = combined
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const token = lines.length > 0 ? lines[lines.length - 1] : '';
+      if (!token) throw new Error('VERTEX_ACCESS_TOKEN_CMD returned empty token');
+      vertexTokenCache.token = token;
+      vertexTokenCache.tsMs = now;
+      return token;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`VERTEX_ACCESS_TOKEN_CMD failed: ${msg}`);
+    }
+  }
 
   const attempts = [
     ['gcloud', ['auth', 'application-default', 'print-access-token']],
@@ -263,7 +322,11 @@ async function getVertexAccessToken() {
         maxBuffer: 1024 * 1024,
       });
       const token = String(stdout || '').trim();
-      if (token) return token;
+      if (token) {
+        vertexTokenCache.token = token;
+        vertexTokenCache.tsMs = now;
+        return token;
+      }
       errors.push(`${bin} ${args.join(' ')} returned empty token`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -372,7 +435,6 @@ async function generateImageWithPrompt({
   geminiApiKey,
   vertexProject,
   vertexLocation,
-  vertexAccessToken,
   purpose,
 }) {
   const payload = {
@@ -397,21 +459,43 @@ async function generateImageWithPrompt({
     'Content-Type': 'application/json',
   };
   if (backend === 'vertex') {
-    headers.Authorization = `Bearer ${vertexAccessToken}`;
+    headers.Authorization = `Bearer ${await getVertexAccessToken()}`;
   }
 
-  const data = await postJsonWithRetries({
-    url,
-    payload,
-    purpose,
-    timeoutMs,
-    headers,
-    retryMax,
-    retryBaseMs,
-    retryMaxMs,
-    retryJitterMs,
-    debugRetries,
-  });
+  let data;
+  try {
+    data = await postJsonWithRetries({
+      url,
+      payload,
+      purpose,
+      timeoutMs,
+      headers,
+      retryMax,
+      retryBaseMs,
+      retryMaxMs,
+      retryJitterMs,
+      debugRetries,
+    });
+  } catch (err) {
+    if (backend === 'vertex' && Number(err?.status) === 401) {
+      // Token can expire during long runs; refresh once and retry.
+      headers.Authorization = `Bearer ${await getVertexAccessToken({ forceRefresh: true })}`;
+      data = await postJsonWithRetries({
+        url,
+        payload,
+        purpose,
+        timeoutMs,
+        headers,
+        retryMax,
+        retryBaseMs,
+        retryMaxMs,
+        retryJitterMs,
+        debugRetries,
+      });
+    } else {
+      throw err;
+    }
+  }
 
   return extractImagesFromResponse(data);
 }
@@ -428,7 +512,7 @@ export async function generateImageBatch({
   outDirRel = 'exports/gemini_images',
   backend = 'gemini',
   model = 'gemini-3-pro-image-preview',
-  fallbackModel = 'gemini-2.5-flash-image',
+  fallbackModel = '',
   promptPrefix = 'Create an image. ',
   responseModalities = ['IMAGE'],
   imageSize = '',
@@ -455,6 +539,8 @@ export async function generateImageBatch({
     throw new Error('Missing required --prompts_file');
   }
   if (typeof outDirRel !== 'string' || outDirRel.length === 0) throw new Error('Invalid --out_dir');
+  assertModelAllowed('--model', model);
+  assertModelAllowed('--fallback_model', fallbackModel);
 
   const { runRoot, manifestPath } = getRunPaths(repoRoot, runId);
   if (!(await fileExists(manifestPath))) {
@@ -478,7 +564,6 @@ export async function generateImageBatch({
   const vertexProject =
     String(process.env.VERTEX_PROJECT || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || '').trim();
   const vertexLocation = String(process.env.VERTEX_LOCATION || process.env.GOOGLE_CLOUD_LOCATION || 'us-central1').trim();
-  const vertexAccessToken = backend === 'vertex' ? await getVertexAccessToken() : '';
   const normalizedImageSize = String(imageSize || '').trim().toUpperCase();
   if (normalizedImageSize && !['1K', '2K', '4K'].includes(normalizedImageSize)) {
     throw new Error(`Invalid --image_size: ${imageSize}. Allowed: 1K, 2K, 4K`);
@@ -558,7 +643,6 @@ export async function generateImageBatch({
               geminiApiKey,
               vertexProject,
               vertexLocation,
-              vertexAccessToken,
               purpose: 'image_generate',
             });
           } catch (err) {
@@ -580,7 +664,6 @@ export async function generateImageBatch({
                   geminiApiKey,
                   vertexProject,
                   vertexLocation,
-                  vertexAccessToken,
                   purpose: 'image_generate_fallback',
                 });
               } catch (fbErr) {
@@ -752,7 +835,7 @@ async function main() {
   const model = trimModelName(args.model, process.env.IMAGE_MODEL || 'gemini-3-pro-image-preview');
   const fallbackModelRaw = trimModelName(
     args.fallback_model ?? args.fallbackModel,
-    process.env.IMAGE_FALLBACK_MODEL || 'gemini-2.5-flash-image',
+    process.env.IMAGE_FALLBACK_MODEL || '',
   );
   const fallbackModel =
     fallbackModelRaw.toLowerCase() === 'none' || fallbackModelRaw.toLowerCase() === 'off' ? '' : fallbackModelRaw;

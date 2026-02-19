@@ -13,13 +13,15 @@ This is intended to answer: can we get “isometric.nyc-level” quality and wha
 
 ## Prereqs
 
-- `gcloud` installed and authenticated
-  - Either set `VERTEX_ACCESS_TOKEN`, or run:
-    - `gcloud auth application-default login`
-- Env (example):
+- Vertex backend (default):
+  - `gcloud` installed and authenticated
+  - Either set `VERTEX_ACCESS_TOKEN`, or run: `gcloud auth application-default login`
   - `export IMAGE_BACKEND=vertex`
   - `export VERTEX_PROJECT="$(gcloud config get-value project)"`
   - `export VERTEX_LOCATION=global`
+- Gemini backend (optional):
+  - `export IMAGE_BACKEND=gemini`
+  - `export GOOGLE_API_KEY=...`
 
 ## Inputs
 
@@ -27,6 +29,9 @@ This is intended to answer: can we get “isometric.nyc-level” quality and wha
 - `--tiles_dir`: run-relative directory that contains `tilejson.json` and the whitebox layer.
   - Typical: `exports/iso_whitebox`
 - `--layer`: input layer inside `tiles_dir` (default: `raw_whitebox`)
+- Optional color reference (extra prompt image):
+  - `--ref_tiles_dir`: run-relative directory with a second tile set (e.g. satellite/raw)
+  - `--ref_layer`: layer inside `ref_tiles_dir` (the prompt label is `COLOR REFERENCE`)
 - Patch selection:
   - `--x0 --y0 --w --h` (default `4x4`)
 - Style anchors:
@@ -44,10 +49,11 @@ pnpm -C packages/data iso:vertex:nbpro \
   --run_id=tashkent_local_2026-02-09 \
   --tiles_dir=exports/iso_whitebox \
   --layer=raw_whitebox \
+  --ref_tiles_dir=exports/iso_satellite \
+  --ref_layer=raw_satellite \
   --x0=0 --y0=0 --w=4 --h=4 \
   --out_dir=exports/iso_nb_pro \
   --model=gemini-3-pro-image-preview \
-  --fallback_model=gemini-2.5-flash-image \
   --anchors_dir=exports/anchors/nbpro \
   --prompt_file=exports/prompts/nbpro.txt \
   --negative_prompt_file=exports/prompts/nbpro_negative.txt \
@@ -76,4 +82,3 @@ Key files:
   - Keep `--fallback_model` enabled
   - Reduce `--k` and/or run later
   - Increase retry: `--retry_max`, `--retry_max_ms`
-

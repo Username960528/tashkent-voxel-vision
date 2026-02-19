@@ -16,13 +16,16 @@ function printHelp() {
 Options:
   --out_dir               Output dir (run-relative). Default: exports/iso_nb_pro
   --layer                 Input layer inside tiles_dir. Default: raw_whitebox
+  --ref_tiles_dir         Optional tiles dir for color reference (run-relative)
+  --ref_layer             Input layer inside ref_tiles_dir for color reference (optional)
   --w --h                 Patch size in tiles. Default: 4x4
+  --backend               vertex|gemini (default: env IMAGE_BACKEND or vertex)
 
 Vertex:
   --vertex_project        Vertex project (or env VERTEX_PROJECT)
   --vertex_location       Vertex location (default: global)
   --model                 Model id/resource (required)
-  --fallback_model        Fallback model (optional)
+  --fallback_model        Fallback model (optional, gemini-2.x is disallowed in this repo)
 
 Generation:
   --k                     Candidates per tile (default: 4)
@@ -50,6 +53,7 @@ Scoring:
   --structure_weight      Weight for structure-fidelity score (default: 0.75)
   --structure_downscale_px  Downscale px for structure scoring (default: 128)
   --structure_weights     JSON string or path to JSON file (optional)
+  --color_weight          Weight for color fidelity vs reference tile (default: 0.0)
   --fallback_penalty      Additive penalty when fallback model is used (default: 0.05)
 
 Cache:
@@ -62,18 +66,21 @@ Mosaic:
 
 Examples:
   export IMAGE_BACKEND=vertex
-  export VERTEX_PROJECT=\"$(gcloud config get-value project)\"
+  export VERTEX_PROJECT="$(gcloud config get-value project)"
   export VERTEX_LOCATION=global
+  # For --backend=gemini, set GOOGLE_API_KEY.
 
   pnpm -C packages/data iso:vertex:nbpro \\
     --run_id=tashkent_local_2026-02-09 \\
     --tiles_dir=exports/iso_whitebox \\
     --layer=raw_whitebox \\
-    --x0=0 --y0=0 --w=4 --h=4 \\
-    --model=gemini-3-pro-image-preview --fallback_model=gemini-2.5-flash-image \\
-    --anchors_dir=exports/anchors/nbpro \\
-    --prompt_file=exports/prompts/nbpro.txt \\
-    --k=4 --overlap_px=48
+    --ref_tiles_dir=exports/iso_satellite \\
+  --ref_layer=raw_satellite \\
+  --x0=0 --y0=0 --w=4 --h=4 \\
+  --model=gemini-3-pro-image-preview \\
+  --anchors_dir=exports/anchors/nbpro \\
+  --prompt_file=exports/prompts/nbpro.txt \\
+  --k=4 --overlap_px=48
 `);
 }
 
@@ -81,6 +88,33 @@ async function fileExists(filePath) {
   try {
     await fs.stat(filePath);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function hasAnyPngTiles(tilesAbs) {
+  // tilesAbs: .../<out_dir>/tiles (expects z=0/<x>/<y>.png)
+  const z0 = path.join(tilesAbs, '0');
+  try {
+    const xs = await fs.readdir(z0);
+    for (const xName of xs) {
+      const xDir = path.join(z0, xName);
+      try {
+        const st = await fs.stat(xDir);
+        if (!st.isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      let ys = [];
+      try {
+        ys = await fs.readdir(xDir);
+      } catch {
+        continue;
+      }
+      if (ys.some((n) => n.toLowerCase().endsWith('.png'))) return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -98,6 +132,25 @@ function ensureRelPath(p) {
   const clean = p.replaceAll('\\', '/').replace(/^\/+/, '').replace(/\/+$/, '');
   if (clean.includes('..')) throw new Error(`Refusing unsafe path with '..': ${p}`);
   return clean;
+}
+
+function normalizeBackend(raw) {
+  const value = String(raw || '')
+    .trim()
+    .toLowerCase();
+  if (!value) return 'vertex';
+  if (value === 'vertex' || value === 'gemini') return value;
+  throw new Error(`Unsupported --backend: ${raw}`);
+}
+
+function assertModelAllowed(flagName, modelId) {
+  const value = String(modelId || '')
+    .trim()
+    .toLowerCase();
+  if (!value) return;
+  if (value.includes('gemini-2.')) {
+    throw new Error(`${flagName}=${modelId} is not allowed in this repository. Use gemini-3-pro-image-preview.`);
+  }
 }
 
 function parseNumber(args, key, fallback) {
@@ -126,11 +179,14 @@ export async function runIsoVertexNbpro({
   runId,
   tilesDirRel,
   layer = 'raw_whitebox',
+  refTilesDirRel = '',
+  refLayer = '',
   outDirRel = 'exports/iso_nb_pro',
   x0,
   y0,
   w = 4,
   h = 4,
+  backend = 'vertex',
   vertexProject = '',
   vertexLocation = 'global',
   model,
@@ -148,6 +204,7 @@ export async function runIsoVertexNbpro({
   overlapPx = 48,
   scoreWeights = '',
   structureWeight = 0.75,
+  colorWeight = 0.0,
   structureDownscalePx = 128,
   structureWeights = '',
   fallbackPenalty = 0.05,
@@ -170,8 +227,14 @@ export async function runIsoVertexNbpro({
   if (typeof repoRoot !== 'string' || repoRoot.length === 0) throw new Error('Missing repoRoot');
   if (typeof tilesDirRel !== 'string' || tilesDirRel.trim().length === 0) throw new Error('Missing required --tiles_dir');
   if (!/^[a-zA-Z0-9._-]+$/.test(layer)) throw new Error(`Invalid --layer: ${layer}`);
+  if ((refTilesDirRel && !refLayer) || (!refTilesDirRel && refLayer)) {
+    throw new Error('Both --ref_tiles_dir and --ref_layer must be set together (or neither).');
+  }
+  if (refLayer && !/^[a-zA-Z0-9._-]+$/.test(refLayer)) throw new Error(`Invalid --ref_layer: ${refLayer}`);
   if (!Number.isFinite(x0) || !Number.isFinite(y0)) throw new Error('Missing required --x0/--y0');
   if (!model || String(model).trim().length === 0) throw new Error('Missing required --model');
+  assertModelAllowed('--model', model);
+  assertModelAllowed('--fallback_model', fallbackModel);
 
   await loadDotenv({ repoRoot });
 
@@ -181,9 +244,11 @@ export async function runIsoVertexNbpro({
   }
 
   const tilesDirRelSafe = ensureRelPath(tilesDirRel) ?? '';
+  const refTilesDirRelSafe = refTilesDirRel ? ensureRelPath(refTilesDirRel) ?? '' : '';
   const outDirRelSafe = ensureRelPath(outDirRel) ?? 'exports/iso_nb_pro';
 
   const tilesBaseAbs = path.join(runRoot, tilesDirRelSafe);
+  const refTilesBaseAbs = refTilesDirRelSafe ? path.join(runRoot, refTilesDirRelSafe) : '';
   const outBaseAbs = path.join(runRoot, outDirRelSafe);
 
   const promptAbs = resolvePath(runRoot, promptFile);
@@ -234,6 +299,7 @@ export async function runIsoVertexNbpro({
       tilesBaseAbs,
       '--layer',
       layer,
+      ...(refTilesBaseAbs ? ['--ref_tiles_dir', refTilesBaseAbs, '--ref_layer', refLayer] : []),
       '--out_dir',
       outBaseAbs,
       '--x0',
@@ -244,6 +310,8 @@ export async function runIsoVertexNbpro({
       String(Math.trunc(w)),
       '--h',
       String(Math.trunc(h)),
+      '--backend',
+      String(backend || 'vertex'),
       '--vertex_project',
       String(vertexProject || ''),
       '--vertex_location',
@@ -277,6 +345,8 @@ export async function runIsoVertexNbpro({
       '--structure_downscale_px',
       String(Math.trunc(structureDownscalePx)),
       ...(structureWeights ? ['--structure_weights', String(structureWeights)] : []),
+      '--color_weight',
+      String(colorWeight),
       '--fallback_penalty',
       String(fallbackPenalty),
       '--cache_dir',
@@ -320,15 +390,19 @@ export async function runIsoVertexNbpro({
 
   if (!['crop', 'blend'].includes(mosaicMode)) throw new Error(`Invalid --mosaic_mode: ${String(mosaicMode)}`);
 
-  const mosaic = await buildIsoMosaic({
-    repoRoot,
-    runId,
-    tilesDirRel: outDirRelSafe,
-    layer: 'tiles',
-    mode: mosaicMode,
-    featherPx: mosaicMode === 'blend' ? mosaicFeather : 0,
-    outRel: `${outDirRelSafe}/mosaic_nb_pro.png`,
-  });
+  let mosaicRel = null;
+  if (await hasAnyPngTiles(path.join(outBaseAbs, 'tiles'))) {
+    const mosaic = await buildIsoMosaic({
+      repoRoot,
+      runId,
+      tilesDirRel: outDirRelSafe,
+      layer: 'tiles',
+      mode: mosaicMode,
+      featherPx: mosaicMode === 'blend' ? mosaicFeather : 0,
+      outRel: `${outDirRelSafe}/mosaic_nb_pro.png`,
+    });
+    mosaicRel = mosaic.outRel;
+  }
 
   return {
     runId,
@@ -336,7 +410,7 @@ export async function runIsoVertexNbpro({
     outDirRel: outDirRelSafe,
     reportRel: reportExists ? path.relative(runRoot, reportAbs).replaceAll('\\', '/') : null,
     heatmapRel: heatmapExists ? path.relative(runRoot, heatmapAbs).replaceAll('\\', '/') : null,
-    mosaicRel: mosaic.outRel,
+    mosaicRel,
   };
 }
 
@@ -353,6 +427,9 @@ async function main() {
   const tilesDirRel = ensureRelPath(typeof args.tiles_dir === 'string' ? args.tiles_dir : args.tilesDir) ?? '';
   const outDirRel = ensureRelPath(typeof args.out_dir === 'string' ? args.out_dir : args.outDir) ?? 'exports/iso_nb_pro';
   const layer = typeof args.layer === 'string' ? args.layer : 'raw_whitebox';
+  const refTilesDirRel = ensureRelPath(typeof args.ref_tiles_dir === 'string' ? args.ref_tiles_dir : args.refTilesDir) ?? '';
+  const refLayer = typeof args.ref_layer === 'string' ? args.ref_layer : '';
+  const backend = normalizeBackend(typeof args.backend === 'string' ? args.backend : process.env.IMAGE_BACKEND || 'vertex');
 
   const repoRoot = (await findRepoRoot(process.cwd())) ?? process.cwd();
 
@@ -362,11 +439,14 @@ async function main() {
       runId,
       tilesDirRel,
       layer,
+      refTilesDirRel,
+      refLayer,
       outDirRel,
       x0: parseNumber(args, 'x0', NaN),
       y0: parseNumber(args, 'y0', NaN),
       w: parseNumber(args, 'w', 4),
       h: parseNumber(args, 'h', 4),
+      backend,
       vertexProject: typeof args.vertex_project === 'string' ? args.vertex_project : process.env.VERTEX_PROJECT || '',
       vertexLocation: typeof args.vertex_location === 'string' ? args.vertex_location : process.env.VERTEX_LOCATION || 'global',
       model: typeof args.model === 'string' ? args.model : '',
@@ -384,6 +464,7 @@ async function main() {
       overlapPx: parseNumber(args, 'overlap_px', 48),
       scoreWeights: typeof args.score_weights === 'string' ? args.score_weights : '',
       structureWeight: parseNumber(args, 'structure_weight', 0.75),
+      colorWeight: parseNumber(args, 'color_weight', 0.0),
       structureDownscalePx: parseNumber(args, 'structure_downscale_px', 128),
       structureWeights: typeof args.structure_weights === 'string' ? args.structure_weights : '',
       fallbackPenalty: parseNumber(args, 'fallback_penalty', 0.05),

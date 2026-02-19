@@ -27,6 +27,11 @@ from seam_score import (
 
 PROMPT_LAYOUT_VERSION = 2
 
+_VERTEX_ACCESS_TOKEN_TTL_SEC = 50 * 60
+_VERTEX_ACCESS_TOKEN_CACHE = {"token": None, "ts": 0.0}
+
+COLOR_FIDELITY_WEIGHTS = {"rgb_l1": 1.0, "rgb_l2": 0.0, "sobel_l1": 0.0}
+
 
 def _ensure_dir(p):
     os.makedirs(p, exist_ok=True)
@@ -73,10 +78,62 @@ def _backoff_ms(attempt, base_ms, max_ms, jitter_ms):
     return delay
 
 
-def _get_vertex_access_token():
+def _normalize_backend(raw):
+    value = str(raw or "").strip().lower()
+    if not value:
+        return "vertex"
+    if value in ("vertex", "gemini"):
+        return value
+    raise ValueError(f"Unsupported --backend: {raw}")
+
+
+def _assert_model_allowed(flag_name, model_id):
+    value = str(model_id or "").strip()
+    if not value:
+        return
+    if "gemini-2." in value.lower():
+        raise SystemExit(f"{flag_name}={value} is not allowed in this repository. Use gemini-3-pro-image-preview.")
+
+
+def _get_vertex_access_token(*, force_refresh=False):
     from_env = str(os.environ.get("VERTEX_ACCESS_TOKEN") or "").strip()
     if from_env:
         return from_env
+
+    now = time.time()
+    cached = _VERTEX_ACCESS_TOKEN_CACHE.get("token")
+    cached_ts = float(_VERTEX_ACCESS_TOKEN_CACHE.get("ts") or 0.0)
+    if (not force_refresh) and cached and (now - cached_ts) < float(_VERTEX_ACCESS_TOKEN_TTL_SEC):
+        return cached
+
+    token_cmd = str(os.environ.get("VERTEX_ACCESS_TOKEN_CMD") or "").strip()
+    if token_cmd:
+        try:
+            raw = (
+                subprocess.check_output(
+                    token_cmd,
+                    shell=True,
+                    stderr=subprocess.STDOUT,
+                    timeout=15,
+                )
+                .decode("utf-8", errors="replace")
+            )
+            lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+            out = lines[-1] if lines else ""
+            if not out:
+                raise RuntimeError("VERTEX_ACCESS_TOKEN_CMD returned empty token")
+            _VERTEX_ACCESS_TOKEN_CACHE["token"] = out
+            _VERTEX_ACCESS_TOKEN_CACHE["ts"] = now
+            return out
+        except RuntimeError:
+            raise
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("VERTEX_ACCESS_TOKEN_CMD timed out") from None
+        except subprocess.CalledProcessError as e:
+            code = int(getattr(e, "returncode", 0) or 0)
+            raise RuntimeError(f"VERTEX_ACCESS_TOKEN_CMD failed (exit status {code})") from None
+        except Exception:
+            raise RuntimeError("VERTEX_ACCESS_TOKEN_CMD failed") from None
 
     attempts = [
         ["gcloud", "auth", "application-default", "print-access-token"],
@@ -85,8 +142,12 @@ def _get_vertex_access_token():
     errors = []
     for cmd in attempts:
         try:
-            out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=15).decode("utf-8").strip()
+            raw = subprocess.check_output(cmd, stderr=subprocess.STDOUT, timeout=15).decode("utf-8", errors="replace")
+            lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+            out = lines[-1] if lines else ""
             if out:
+                _VERTEX_ACCESS_TOKEN_CACHE["token"] = out
+                _VERTEX_ACCESS_TOKEN_CACHE["ts"] = now
                 return out
             errors.append(" ".join(cmd) + " returned empty token")
         except Exception as e:
@@ -95,6 +156,13 @@ def _get_vertex_access_token():
     raise RuntimeError(
         "Missing Vertex auth token. Set VERTEX_ACCESS_TOKEN or authorize gcloud.\n" + "\n".join(errors)
     )
+
+
+def _get_gemini_api_key():
+    from_env = str(os.environ.get("GOOGLE_API_KEY") or "").strip()
+    if from_env:
+        return from_env
+    raise RuntimeError("Missing GOOGLE_API_KEY for gemini backend")
 
 
 def _build_vertex_url(model, project, location):
@@ -115,16 +183,33 @@ def _build_vertex_url(model, project, location):
     return f"https://{host}/v1/{model_res}:generateContent"
 
 
-def _post_json(url, payload, *, access_token, timeout_ms):
+def _build_gemini_url(model, gemini_api_key):
+    model_id = str(model or "").strip()
+    if not model_id:
+        raise ValueError("Missing model")
+    if model_id.startswith("projects/"):
+        raise ValueError("Gemini backend requires model id (for example: gemini-3-pro-image-preview)")
+    if model_id.startswith("models/"):
+        model_id = model_id.split("/", 1)[1]
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={gemini_api_key}"
+
+
+def _build_generate_url(backend, model, *, vertex_project, vertex_location, gemini_api_key):
+    if backend == "gemini":
+        return _build_gemini_url(model, gemini_api_key)
+    return _build_vertex_url(model, vertex_project, vertex_location)
+
+
+def _post_json(url, payload, *, headers, timeout_ms):
     body = json.dumps(payload).encode("utf-8")
+    req_headers = {"Content-Type": "application/json"}
+    if isinstance(headers, dict):
+        req_headers.update(headers)
     req = urllib.request.Request(
         url,
         data=body,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-        },
+        headers=req_headers,
     )
     with urllib.request.urlopen(req, timeout=max(1, int(timeout_ms)) / 1000.0) as resp:
         raw = resp.read()
@@ -135,7 +220,7 @@ def _post_json_with_retries(
     url,
     payload,
     *,
-    access_token,
+    headers,
     timeout_ms,
     retry_max,
     retry_base_ms,
@@ -147,7 +232,7 @@ def _post_json_with_retries(
     attempt = 0
     while True:
         try:
-            return _post_json(url, payload, access_token=access_token, timeout_ms=timeout_ms)
+            return _post_json(url, payload, headers=headers, timeout_ms=timeout_ms)
         except urllib.error.HTTPError as e:
             status = int(getattr(e, "code", 0) or 0)
             text = ""
@@ -200,7 +285,7 @@ def _extract_inline_images(data):
                 # For this pilot we need bytes on disk. If the model returns file URIs (e.g. GCS),
                 # we would need an authenticated download path; treat as an error for now.
                 uri = file_data.get("fileUri") or file_data.get("file_uri")
-                raise RuntimeError(f"Vertex returned fileUri instead of inline bytes: {uri}")
+                raise RuntimeError(f"Model returned fileUri instead of inline bytes: {uri}")
 
     raise RuntimeError("No image data in response")
 
@@ -299,12 +384,14 @@ def _read_json(path):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Vertex Nano Banana Pro 4x4 pilot: K candidates per tile + seam scoring.")
+    ap = argparse.ArgumentParser(description="NB Pro 4x4 pilot: K candidates per tile + seam scoring (vertex|gemini).")
 
     ap.add_argument("--run_id", required=True)
     ap.add_argument("--run_root", required=True, help="Absolute run root (data/releases/<run_id>)")
     ap.add_argument("--tiles_dir", required=True, help="Absolute base tiles dir (expects tilejson.json and layer/0/x/y.png)")
     ap.add_argument("--layer", default="raw_whitebox", help="Input layer inside tiles_dir (default: raw_whitebox)")
+    ap.add_argument("--ref_tiles_dir", default="", help="Optional absolute base tiles dir for COLOR REFERENCE (layer/0/x/y.png)")
+    ap.add_argument("--ref_layer", default="", help="Optional reference layer inside ref_tiles_dir (used as COLOR REFERENCE)")
     ap.add_argument("--out_dir", required=True, help="Absolute output dir (exports/iso_nb_pro)")
 
     ap.add_argument("--x0", type=int, required=True)
@@ -312,6 +399,7 @@ def main():
     ap.add_argument("--w", type=int, default=4)
     ap.add_argument("--h", type=int, default=4)
 
+    ap.add_argument("--backend", default="vertex", help="vertex|gemini (default: vertex)")
     ap.add_argument("--vertex_project", default="")
     ap.add_argument("--vertex_location", default="global")
     ap.add_argument("--model", required=True)
@@ -338,6 +426,12 @@ def main():
     ap.add_argument("--structure_weight", type=float, default=0.75)
     ap.add_argument("--structure_downscale_px", type=int, default=128)
     ap.add_argument("--structure_weights", default="")
+    ap.add_argument(
+        "--color_weight",
+        type=float,
+        default=0.0,
+        help="Weight for color fidelity vs the reference tile (only used when --ref_tiles_dir/--ref_layer are provided).",
+    )
     ap.add_argument("--fallback_penalty", type=float, default=0.05)
 
     ap.add_argument("--cache_dir", default=".cache/vertex_nb_pro")
@@ -359,12 +453,24 @@ def main():
 
     run_root = os.path.abspath(args.run_root)
     tiles_dir = os.path.abspath(args.tiles_dir)
+    ref_tiles_dir = ""
+    ref_layer = ""
+    ref_enabled = bool(str(args.ref_tiles_dir or "").strip() or str(args.ref_layer or "").strip())
+    if ref_enabled:
+        if not str(args.ref_tiles_dir or "").strip():
+            raise SystemExit("--ref_layer requires --ref_tiles_dir")
+        if not str(args.ref_layer or "").strip():
+            raise SystemExit("--ref_tiles_dir requires --ref_layer")
+        ref_tiles_dir = os.path.abspath(args.ref_tiles_dir)
+        ref_layer = str(args.ref_layer).strip()
     out_dir = os.path.abspath(args.out_dir)
 
     if not os.path.isdir(run_root):
         raise SystemExit(f"missing run_root: {run_root}")
     if not os.path.isdir(tiles_dir):
         raise SystemExit(f"missing tiles_dir: {tiles_dir}")
+    if ref_enabled and not os.path.isdir(ref_tiles_dir):
+        raise SystemExit(f"missing ref_tiles_dir: {ref_tiles_dir}")
     if args.w <= 0 or args.h <= 0:
         raise SystemExit("--w/--h must be > 0")
     if args.k <= 0:
@@ -377,6 +483,8 @@ def main():
         raise SystemExit("--structure_downscale_px must be > 0")
     if not math.isfinite(float(args.structure_weight)) or float(args.structure_weight) < 0.0:
         raise SystemExit("--structure_weight must be >= 0")
+    if not math.isfinite(float(args.color_weight)) or float(args.color_weight) < 0.0:
+        raise SystemExit("--color_weight must be >= 0")
     if not math.isfinite(float(args.fallback_penalty)) or float(args.fallback_penalty) < 0.0:
         raise SystemExit("--fallback_penalty must be >= 0")
 
@@ -402,8 +510,18 @@ def main():
         "- Do not introduce new large objects that cross tile boundaries.",
         "- Keep global lighting/camera consistent with the anchors.",
     ]
-    if "whitebox" not in layer_lower:
-        prompt_guardrails_lines.insert(1, "- Preserve per-building roof colors/materials from the input tile; avoid homogenizing everything.")
+    if ref_enabled:
+        prompt_guardrails_lines.insert(
+            1, "- Preserve per-building roof colors/materials from the COLOR REFERENCE tile; avoid homogenizing everything."
+        )
+        prompt_guardrails_lines.insert(
+            2,
+            "- Lean on the COLOR REFERENCE to keep Tashkent-specific turquoise/mint/blue roofs instead of drifting toward generic browns.",
+        )
+    elif "whitebox" not in layer_lower:
+        prompt_guardrails_lines.insert(
+            1, "- Preserve per-building roof colors/materials from the input tile; avoid homogenizing everything."
+        )
     prompt_guardrails = "\n".join(prompt_guardrails_lines).strip()
     prompt_guardrails_hash = _sha256_text(prompt_guardrails) if prompt_guardrails else ""
 
@@ -431,21 +549,26 @@ def main():
             structure_weights_raw = json.loads(_read_text(raw))
         else:
             raise SystemExit(f"--structure_weights must be a JSON string or existing file path: {raw}")
-    # For satellite/raw tiles, bias selection harder towards color/texture fidelity so we don't collapse
-    # into a single "safe" roof palette just to minimize seam diffs.
+    # For satellite/raw tiles (or when a COLOR REFERENCE is provided), bias selection harder towards
+    # color/texture fidelity so we don't collapse into a single "safe" roof palette just to minimize seams.
     default_structure_weights = {"rgb_l1": 0.15, "rgb_l2": 0.0, "sobel_l1": 1.0}
-    if "whitebox" not in layer_lower:
+    if ref_enabled or ("whitebox" not in layer_lower):
         default_structure_weights = {"rgb_l1": 1.0, "rgb_l2": 0.0, "sobel_l1": 0.5}
     structure_weights_norm = normalize_weights(structure_weights_raw, default=default_structure_weights)
 
     structure_weight = float(args.structure_weight)
     structure_downscale_px = int(args.structure_downscale_px)
     fallback_penalty = float(args.fallback_penalty)
+    color_weight = float(args.color_weight)
 
+    backend = _normalize_backend(args.backend)
     vertex_project = str(args.vertex_project or "").strip() or str(os.environ.get("VERTEX_PROJECT") or "").strip()
     vertex_location = str(args.vertex_location or "").strip() or str(os.environ.get("VERTEX_LOCATION") or "global").strip()
+    gemini_api_key = _get_gemini_api_key() if backend == "gemini" else ""
     model = str(args.model).strip()
     fallback_model = str(args.fallback_model or "").strip()
+    _assert_model_allowed("--model", model)
+    _assert_model_allowed("--fallback_model", fallback_model)
 
     cfg = {
         "temperature": float(args.temperature),
@@ -455,7 +578,10 @@ def main():
         "response_modalities": ["IMAGE"],
         "candidate_count": 1,
     }
-    params_hash = _sha256_text(json.dumps({"vertex": {"project": vertex_project, "location": vertex_location}, "cfg": cfg}, sort_keys=True))
+    params_payload = {"backend": backend, "cfg": cfg}
+    if backend == "vertex":
+        params_payload["vertex"] = {"project": vertex_project, "location": vertex_location}
+    params_hash = _sha256_text(json.dumps(params_payload, sort_keys=True))
 
     out_tiles_dir = os.path.join(out_dir, "tiles")
     out_candidates_dir = os.path.join(out_dir, "candidates")
@@ -474,6 +600,22 @@ def main():
         anchors_hashes.append(h)
         anchors_info.append({"path": _relpath_if_under(run_root, p), "sha256": h})
 
+    # Determine target output size from first input tile (and validate ref tile when present).
+    sample_in = os.path.join(tiles_dir, args.layer, "0", str(args.x0), f"{args.y0}.png")
+    if not os.path.isfile(sample_in):
+        raise SystemExit(f"missing input tile: {sample_in}")
+    with Image.open(sample_in) as _sample_src:
+        sample_img = _sample_src.convert("RGB")
+        target_size = sample_img.size
+
+    sample_ref = ""
+    ref_sample_sha256 = ""
+    if ref_enabled:
+        sample_ref = os.path.join(ref_tiles_dir, ref_layer, "0", str(args.x0), f"{args.y0}.png")
+        if not os.path.isfile(sample_ref):
+            raise SystemExit(f"missing ref tile: {sample_ref}")
+        ref_sample_sha256 = sha256_file(sample_ref)
+
     # Guard against accidentally reusing an out_dir from a different config, which would silently
     # mix old tiles with new ones due to idempotent "skip if exists" behavior.
     config_path = os.path.join(out_dir, "config_nb_pro.json")
@@ -483,6 +625,11 @@ def main():
         "run_id": args.run_id,
         "tiles_dir": _relpath_if_under(run_root, tiles_dir),
         "layer": str(args.layer),
+        "ref_tiles_dir": _relpath_if_under(run_root, ref_tiles_dir) if ref_enabled else None,
+        "ref_layer": str(ref_layer) if ref_enabled else None,
+        "ref_sample_tile": _relpath_if_under(run_root, sample_ref) if ref_enabled else None,
+        "ref_sample_tile_sha256": str(ref_sample_sha256) if ref_enabled else None,
+        "backend": backend,
         "subgrid": {"x0": int(args.x0), "y0": int(args.y0), "w": int(args.w), "h": int(args.h)},
         "vertex": {
             "project": vertex_project,
@@ -507,6 +654,8 @@ def main():
         "structure_weight": structure_weight,
         "structure_downscale_px": structure_downscale_px,
         "structure_weights": structure_weights_norm,
+        "color_weight": float(color_weight),
+        "color_fidelity_weights": COLOR_FIDELITY_WEIGHTS,
         "fallback_penalty": fallback_penalty,
     }
     run_config_hash = _sha256_text(json.dumps(run_config, sort_keys=True))
@@ -534,14 +683,6 @@ def main():
     if (not os.path.isfile(config_path)) or int(args.force):
         _write_json(config_path, {"config_hash": run_config_hash, "config": run_config})
 
-    # Determine target output size from first input tile.
-    sample_in = os.path.join(tiles_dir, args.layer, "0", str(args.x0), f"{args.y0}.png")
-    if not os.path.isfile(sample_in):
-        raise SystemExit(f"missing input tile: {sample_in}")
-    with Image.open(sample_in) as _sample_src:
-        sample_img = _sample_src.convert("RGB")
-        target_size = sample_img.size
-
     selected = {}  # (x,y) -> abs path
     selected_sha = {}  # (x,y) -> sha256
 
@@ -558,6 +699,17 @@ def main():
             if not os.path.isfile(tile_in):
                 raise SystemExit(f"missing input tile in patch: {tile_in}")
 
+            ref_tile_in = ""
+            ref_tile_hash = ""
+            if ref_enabled:
+                ref_tile_in = os.path.join(ref_tiles_dir, ref_layer, "0", str(x), f"{y}.png")
+                if not os.path.isfile(ref_tile_in):
+                    raise SystemExit(f"missing ref tile in patch: {ref_tile_in}")
+                ref_tile_hash = sha256_file(ref_tile_in)
+            ref_rgb = None
+            if ref_enabled:
+                ref_rgb, _ = load_rgb(ref_tile_in, target_size=target_size)
+
             tile_out = _selected_path(x, y)
             _ensure_dir(os.path.dirname(tile_out))
 
@@ -567,6 +719,8 @@ def main():
                 # Keep the historical key for compatibility; pilots may use non-whitebox layers (e.g. raw satellite).
                 "input_tile_path": rel_input,
                 "input_whitebox_path": rel_input,
+                "ref_tile_path": _relpath_if_under(run_root, ref_tile_in) if ref_enabled else None,
+                "ref_tile_sha256": str(ref_tile_hash) if ref_enabled else None,
                 "neighbors_used": [],
                 "prompt_hash": prompt_hash,
                 "candidates": [],
@@ -584,10 +738,20 @@ def main():
             # Include the input tile hash in cache keys so cache is safe across runs/updates.
             tile_in_hash = sha256_file(tile_in)
             tile_in_rgb, _ = load_rgb(tile_in, target_size=target_size)
-            tile_in_rgb_struct = None
+
+            # Structure scoring reference:
+            # - by default compare candidate vs INPUT TILE (good for raw/satellite input)
+            # - when COLOR REFERENCE is provided (typically raw/satellite), compare candidate vs that reference
+            struct_ref_rgb = tile_in_rgb
+            struct_ref_kind = "input"
+            if ref_enabled and ref_rgb is not None:
+                struct_ref_rgb = ref_rgb
+                struct_ref_kind = "ref"
+
+            struct_ref_rgb_struct = None
             if structure_weight > 0.0:
-                tile_in_rgb_struct = _resize_rgb_array(
-                    tile_in_rgb,
+                struct_ref_rgb_struct = _resize_rgb_array(
+                    struct_ref_rgb,
                     out_size=(structure_downscale_px, structure_downscale_px),
                 )
 
@@ -626,6 +790,7 @@ def main():
             best_structure_score = None
             best_model_used = None
             best_fallback_penalty = 0.0
+            best_color_score = None
 
             for vi in range(int(args.k)):
                 seed = _pick_seed(args.seed_mode, args.seed_base, x, y, vi)
@@ -639,6 +804,8 @@ def main():
                     "y": int(y),
                     "layer": str(args.layer),
                     "tile_in_sha256": tile_in_hash,
+                    "ref_layer": str(ref_layer) if ref_enabled else "",
+                    "ref_tile_in_sha256": str(ref_tile_hash) if ref_enabled else "",
                     "seed": int(seed),
                     "cfg": cfg,
                     "neighbor_mode": str(args.neighbor_mode),
@@ -647,8 +814,10 @@ def main():
 
                 def _cache_key(model_used):
                     payload = dict(gen_common)
+                    payload["backend"] = backend
                     payload["model"] = str(model_used)
-                    payload["vertex"] = {"project": vertex_project, "location": vertex_location}
+                    if backend == "vertex":
+                        payload["vertex"] = {"project": vertex_project, "location": vertex_location}
                     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
                 used_model = model
@@ -692,6 +861,14 @@ def main():
                         if "tl" in neighbors:
                             parts.extend(_file_to_inline_part(neighbors["tl"], "NEIGHBOR TOP-LEFT"))
 
+                    if ref_enabled:
+                        parts.append(
+                            {
+                                "text": f"Color reference tile (layer={ref_layer}, use only for colors/materials/texture; do not change geometry):"
+                            }
+                        )
+                        parts.extend(_file_to_inline_part(ref_tile_in, "COLOR REFERENCE"))
+
                     if "whitebox" in layer_lower:
                         input_desc = f"Input tile (layer={args.layer}, whitebox/structure guide): preserve geometry/camera/roads/building footprints."
                     else:
@@ -699,6 +876,8 @@ def main():
                             f"Input tile (layer={args.layer}, source/aerial): preserve road layout + building footprints, "
                             "and keep local roof colors/materials (avoid homogenizing palette)."
                         )
+                    if ref_enabled:
+                        input_desc = input_desc.rstrip(".") + "; use COLOR REFERENCE to guide colors/materials."
                     parts.append({"text": input_desc})
                     parts.extend(_file_to_inline_part(tile_in, "INPUT TILE"))
 
@@ -721,20 +900,49 @@ def main():
                     payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": generation_config}
 
                     def _call_model(model_used):
-                        url = _build_vertex_url(model_used, vertex_project, vertex_location)
-                        return _post_json_with_retries(
-                            url,
-                            payload,
-                            # Long runs can exceed the lifetime of a single access token; re-fetch per request.
-                            access_token=_get_vertex_access_token(),
-                            timeout_ms=args.timeout_ms,
-                            retry_max=args.retry_max,
-                            retry_base_ms=args.retry_base_ms,
-                            retry_max_ms=args.retry_max_ms,
-                            retry_jitter_ms=args.retry_jitter_ms,
-                            debug_retries=bool(int(args.debug_retries)),
-                            purpose="image_generate",
+                        url = _build_generate_url(
+                            backend,
+                            model_used,
+                            vertex_project=vertex_project,
+                            vertex_location=vertex_location,
+                            gemini_api_key=gemini_api_key,
                         )
+                        headers = {"Content-Type": "application/json"}
+                        if backend == "vertex":
+                            # Long runs can exceed the lifetime of a single access token; refresh on a schedule and on 401.
+                            headers["Authorization"] = f"Bearer {_get_vertex_access_token()}"
+                        try:
+                            return _post_json_with_retries(
+                                url,
+                                payload,
+                                headers=headers,
+                                timeout_ms=args.timeout_ms,
+                                retry_max=args.retry_max,
+                                retry_base_ms=args.retry_base_ms,
+                                retry_max_ms=args.retry_max_ms,
+                                retry_jitter_ms=args.retry_jitter_ms,
+                                debug_retries=bool(int(args.debug_retries)),
+                                purpose="image_generate",
+                            )
+                        except RuntimeError as e:
+                            if backend == "vertex":
+                                cause = getattr(e, "__cause__", None)
+                                status = int(getattr(cause, "code", 0) or 0)
+                                if status == 401:
+                                    headers["Authorization"] = f"Bearer {_get_vertex_access_token(force_refresh=True)}"
+                                    return _post_json_with_retries(
+                                        url,
+                                        payload,
+                                        headers=headers,
+                                        timeout_ms=args.timeout_ms,
+                                        retry_max=args.retry_max,
+                                        retry_base_ms=args.retry_base_ms,
+                                        retry_max_ms=args.retry_max_ms,
+                                        retry_jitter_ms=args.retry_jitter_ms,
+                                        debug_retries=bool(int(args.debug_retries)),
+                                        purpose="image_generate",
+                                    )
+                            raise
 
                     data = None
                     try:
@@ -778,6 +986,8 @@ def main():
                     "path": _relpath_if_under(run_root, cand_png),
                     "seam_score": None,
                     "metrics": None,
+                    "color_score": None,
+                    "color_metrics": None,
                     "latency_ms": latency_ms,
                     "cached": bool(cached),
                     "model_used": used_model,
@@ -801,23 +1011,41 @@ def main():
 
                     structure_score = 0.0
                     structure_metrics = None
-                    if structure_weight > 0.0 and tile_in_rgb_struct is not None:
+                    if structure_weight > 0.0 and struct_ref_rgb_struct is not None:
                         cand_rgb_struct = _resize_rgb_array(
                             cand_rgb,
                             out_size=(structure_downscale_px, structure_downscale_px),
                         )
                         structure_score, structure_metrics = score_pair(
-                            tile_in_rgb_struct,
+                            struct_ref_rgb_struct,
                             cand_rgb_struct,
                             weights=structure_weights_norm,
                         )
                     cand_entry["structure_score"] = float(structure_score) if structure_weight > 0.0 else None
                     cand_entry["structure_metrics"] = structure_metrics
+                    cand_entry["structure_ref"] = struct_ref_kind
+
+                    color_score = None
+                    color_metrics = None
+                    if ref_enabled and ref_rgb is not None:
+                        color_score, color_metrics = score_pair(
+                            ref_rgb,
+                            cand_rgb,
+                            weights=COLOR_FIDELITY_WEIGHTS,
+                        )
+                    cand_entry["color_score"] = float(color_score) if color_score is not None else None
+                    cand_entry["color_metrics"] = color_metrics
 
                     applied_fallback_penalty = fallback_penalty if used_model != model else 0.0
                     cand_entry["fallback_penalty"] = float(applied_fallback_penalty)
 
-                    total_score = seam_score + structure_weight * float(structure_score) + float(applied_fallback_penalty)
+                    color_component = color_weight * float(color_score) if color_score is not None else 0.0
+                    total_score = (
+                        seam_score
+                        + structure_weight * float(structure_score)
+                        + float(applied_fallback_penalty)
+                        + color_component
+                    )
                     cand_entry["total_score"] = float(total_score)
 
                     if best_total_score is None or total_score < best_total_score:
@@ -828,6 +1056,7 @@ def main():
                         best_structure_score = float(structure_score) if structure_weight > 0.0 else None
                         best_model_used = used_model
                         best_fallback_penalty = float(applied_fallback_penalty)
+                        best_color_score = float(color_score) if color_score is not None else None
 
                 tile_entry["candidates"].append(cand_entry)
 
@@ -848,6 +1077,7 @@ def main():
                 "structure_score": float(best_structure_score) if best_structure_score is not None else None,
                 "model_used": best_model_used,
                 "fallback_penalty": float(best_fallback_penalty),
+                "color_score": float(best_color_score) if best_color_score is not None else None,
                 "cached": False,
             }
             tiles_report.append(tile_entry)
@@ -963,8 +1193,13 @@ def main():
         "run_id": args.run_id,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tiles_dir": _relpath_if_under(run_root, tiles_dir),
+        "ref_tiles_dir": _relpath_if_under(run_root, ref_tiles_dir) if ref_enabled else None,
+        "ref_layer": str(ref_layer) if ref_enabled else None,
+        "ref_sample_tile": _relpath_if_under(run_root, sample_ref) if ref_enabled else None,
+        "ref_sample_tile_sha256": str(ref_sample_sha256) if ref_enabled else None,
         "out_dir": _relpath_if_under(run_root, out_dir),
         "config_hash": run_config_hash,
+        "backend": backend,
         "vertex": {
             "project": vertex_project,
             "location": vertex_location,
@@ -985,6 +1220,10 @@ def main():
             "weight": float(structure_weight),
             "downscale_px": int(structure_downscale_px),
             "weights": structure_weights_norm,
+        },
+        "color": {
+            "weight": float(color_weight),
+            "weights": COLOR_FIDELITY_WEIGHTS,
         },
         "fallback_penalty": float(fallback_penalty),
         "tiles": tiles_report,
