@@ -43,6 +43,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
   pull-requests: write
   issues: write
 
@@ -731,7 +732,7 @@ jobs:
           REPO: ${{ steps.pr.outputs.repo }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         with:
-          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             const prNumber = Number(process.env.PR_NUMBER || 0);
             const repoFull = String(process.env.REPO || '');
@@ -801,7 +802,7 @@ jobs:
           COMMENT_ID: ${{ steps.pr.outputs.comment_id }}
           COMMENT_KIND: ${{ steps.pr.outputs.comment_kind }}
         with:
-          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             const prNumber = Number(process.env.PR_NUMBER || 0);
             const repoFull = String(process.env.REPO || '');
