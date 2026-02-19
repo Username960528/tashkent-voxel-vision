@@ -186,7 +186,7 @@ jobs:
           COMMENT_ID: ${{ steps.ctx.outputs.comment_id }}
           COMMENT_KIND: ${{ steps.ctx.outputs.comment_kind }}
         with:
-          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             const owner = String(process.env.OWNER || '').trim();
             const repo = String(process.env.REPO_NAME || '').trim();

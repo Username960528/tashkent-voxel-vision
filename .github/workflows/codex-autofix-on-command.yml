@@ -17,7 +17,7 @@ jobs:
       - name: Dispatch self-hosted autofix on @codex command
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.CODEX_REVIEW_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             const issue = context.payload?.issue;
             const comment = context.payload?.comment;
